@@ -10,9 +10,25 @@ fi
 app_path=${1:A}
 plist_path="$app_path/Contents/Info.plist"
 executable_path="$app_path/Contents/MacOS/DSHDesktop"
-icon_path="$app_path/Contents/Resources/AppIcon.icns"
+app_icon_path="$app_path/Contents/Resources/PancakeAppIcon.icns"
+dock_icon_path="$app_path/Contents/Resources/DockIcon.icns"
+signature_manifest_path="$app_path/Contents/_CodeSignature/CodeResources"
+notification_plugin_dir="$app_path/Contents/Resources/DSHNotifications"
+notification_plugin_package="$notification_plugin_dir/package.json"
+notification_plugin_patch="$notification_plugin_dir/cordis.patch.yml"
+notification_plugin_host="$notification_plugin_dir/lib/index.js"
+notification_plugin_client="$notification_plugin_dir/lib/client.js"
 
-for required_path in "$plist_path" "$executable_path" "$icon_path"; do
+for required_path in \
+    "$plist_path" \
+    "$executable_path" \
+    "$app_icon_path" \
+    "$dock_icon_path" \
+    "$signature_manifest_path" \
+    "$notification_plugin_package" \
+    "$notification_plugin_patch" \
+    "$notification_plugin_host" \
+    "$notification_plugin_client"; do
     if [[ ! -e "$required_path" ]]; then
         print -u2 "App 包缺少必需文件：$required_path"
         exit 1
@@ -20,11 +36,23 @@ for required_path in "$plist_path" "$executable_path" "$icon_path"; do
 done
 
 /usr/bin/plutil -lint "$plist_path"
+/usr/bin/codesign --verify --deep --strict --verbose=4 "$app_path"
 bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist_path")
+bundle_icon_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist_path")
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist_path")
 build_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist_path")
 automatic_termination=$(/usr/libexec/PlistBuddy -c 'Print :NSSupportsAutomaticTermination' "$plist_path")
 sudden_termination=$(/usr/libexec/PlistBuddy -c 'Print :NSSupportsSuddenTermination' "$plist_path")
+
+if [[ "$bundle_identifier" != "io.github.hellokitty-23.dsd-pancake" ]]; then
+    print -u2 "bundle ID 不正确：$bundle_identifier"
+    exit 1
+fi
+
+if [[ "$bundle_icon_name" != "PancakeAppIcon" ]]; then
+    print -u2 "bundle 主图标资源键不正确：$bundle_icon_name"
+    exit 1
+fi
 
 if [[ "$automatic_termination" != "false" || "$sudden_termination" != "false" ]]; then
     print -u2 "自动或突然终止配置不符合生命周期约束。"
@@ -42,13 +70,38 @@ if [[ -n "$unexpected_macos_executable" ]]; then
     exit 1
 fi
 
-# 当前薄壳的 Release bundle 只有主可执行文件、Info.plist 和图标。以严格白名单
-# 校验全部常规文件和符号链接，避免未来打包脚本意外带入 DSH、Node.js、插件、网页
-# 资源或测试夹具，而不是仅靠文件名猜测。
+# Release bundle 只有主可执行文件、Info.plist、两套图标和一个已构建的 App 私有提醒
+# 插件。严格白名单避免未来意外带入 DSH、Node.js、第三方插件、网页资源或测试夹具。
+if /usr/bin/find "$notification_plugin_dir" -type f \
+    ! -path "$notification_plugin_package" \
+    ! -path "$notification_plugin_patch" \
+    ! -path "$notification_plugin_host" \
+    ! -path "$notification_plugin_client" \
+    -print -quit | /usr/bin/grep -q .; then
+    print -u2 "提醒插件目录中发现不属于发行白名单的文件。"
+    exit 1
+fi
+
+if /usr/bin/find "$notification_plugin_dir" -type d -name node_modules -print -quit | /usr/bin/grep -q .; then
+    print -u2 "提醒插件目录中不应包含 node_modules。"
+    exit 1
+fi
+
+if ! /usr/bin/grep -Fq '"name": "@dsd-pancake/dsh-desktop-notifications"' "$notification_plugin_package"; then
+    print -u2 "提醒插件 package.json 身份不正确。"
+    exit 1
+fi
+
 unexpected_bundle_file=$(/usr/bin/find "$app_path/Contents" -type f \
     ! -path "$plist_path" \
     ! -path "$executable_path" \
-    ! -path "$icon_path" \
+    ! -path "$app_icon_path" \
+    ! -path "$dock_icon_path" \
+    ! -path "$signature_manifest_path" \
+    ! -path "$notification_plugin_package" \
+    ! -path "$notification_plugin_patch" \
+    ! -path "$notification_plugin_host" \
+    ! -path "$notification_plugin_client" \
     -print -quit)
 if [[ -n "$unexpected_bundle_file" ]]; then
     print -u2 "App 包中发现不属于薄壳白名单的文件：$unexpected_bundle_file"
@@ -64,4 +117,4 @@ fi
 print "PASS: bundle ID = $bundle_identifier"
 print "PASS: version/build = $version/$build_number"
 print "PASS: architecture = $(/usr/bin/lipo -archs "$executable_path")"
-print "PASS: bundle 仅含 DSHDesktop、Info.plist 与图标；未捆绑 DSH、Node.js、插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"
+print "PASS: bundle 已通过本机 ad-hoc 签名校验，且仅含 DSD Pancake 主可执行文件、Info.plist、图标与 App 私有提醒插件；未捆绑 DSH、Node.js、第三方插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"

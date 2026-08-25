@@ -16,6 +16,7 @@ xcuserdata/
 *.xcarchive
 *.dSYM/
 *.app
+*.dmg
 *.zip
 
 # Local configuration and credentials. Keep a deliberately created example file trackable.
@@ -26,3 +27,9 @@ xcuserdata/
 # Local assistant and private development records
 /.claude/
 /private/
+/.playwright-cli/
+
+# App-private DSH notification plugin development artifacts
+/Plugins/**/node_modules/
+/Plugins/**/*.tsbuildinfo
+/Plugins/**/*.map

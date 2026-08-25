@@ -4,7 +4,7 @@ DSD Pancake 的目标是可靠的本机薄壳，不是功能越来越多的 DSH 
 
 ## 不变的边界
 
-- 不捆绑、安装、升级或修改 DSH、Node.js、插件和用户数据；
+- 不捆绑、安装、升级或修改 DSH、Node.js、用户／第三方插件和用户数据；App 自带的私有提醒插件只作为当前壳的一部分随包发布，不写入用户 profile（配置档）；
 - 不增加通用 Shell、任意命令执行、远程管理或全局进程扫描；
 - 端口可达不等于进程归属。只有本次 App 直接创建并复核通过的进程才可被停止；
 - 网页页面保持 DSH 自己控制。原生层不得读取会话、Cookie、输入或内容；
@@ -16,7 +16,10 @@ DSD Pancake 的目标是可靠的本机薄壳，不是功能越来越多的 DSH 
 swift build -c release
 zsh scripts/verify.zsh
 zsh -n scripts/local-release/build-app.zsh
+zsh -n scripts/local-release/build-dmg.zsh
+zsh -n scripts/local-release/build-release.zsh
 zsh -n scripts/local-release/verify-app.zsh
+zsh -n scripts/local-release/verify-dmg.zsh
 git diff --check
 ```
 
@@ -24,7 +27,7 @@ git diff --check
 
 ## 不应提交的内容
 
-不要提交本机构建产物、`.app`、ZIP、`.build`、`local-release`、本地 DSH 配置、日志、Cookie、终端记录、截图、`.env` 或个人路径。`.gitignore` 已覆盖常见情况，但提交前仍应检查：
+不要提交本机构建产物、`.app`、DMG（磁盘映像）、ZIP、`.build`、`local-release`、本地 DSH 配置、日志、Cookie、终端记录、截图、`.env` 或个人路径。`.gitignore` 已覆盖常见情况，但提交前仍应检查：
 
 ```zsh
 git status --short

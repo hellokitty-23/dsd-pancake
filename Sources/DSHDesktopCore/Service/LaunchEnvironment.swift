@@ -29,7 +29,8 @@ public enum LaunchEnvironment {
     public static func makeSpec(
         executable: DSHExecutable,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        notificationPatchURL: URL? = nil
     ) -> LaunchSpec {
         var environment = baseEnvironment
         let executableDirectory = executable.url.deletingLastPathComponent().path
@@ -41,10 +42,23 @@ public enum LaunchEnvironment {
 
         return LaunchSpec(
             executable: executable.url,
-            arguments: requiredArguments,
+            arguments: launchArguments(notificationPatchURL: notificationPatchURL),
             workingDirectory: homeDirectory,
             environment: environment
         )
+    }
+
+    /// `--patch` 属于 DSH launcher，而不是 `web` 子命令；有覆盖层时必须使用
+    /// `--profile web` 形式，才能让覆盖层只附着于本次启动。
+    public static func launchArguments(notificationPatchURL: URL?) -> [String] {
+        guard let notificationPatchURL else { return requiredArguments }
+        return [
+            "--profile", "web",
+            "--patch", notificationPatchURL.path,
+            "--no-open",
+            "--host", LocalService.host,
+            "--port", "\(LocalService.port)",
+        ]
     }
 
     public static func deduplicatedPaths(_ entries: [String]) -> [String] {

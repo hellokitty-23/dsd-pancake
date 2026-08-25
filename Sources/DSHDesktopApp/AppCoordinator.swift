@@ -59,8 +59,25 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private let instanceLock: SingleInstanceLock
     private let probe = ServiceProbe()
     private let locator = DSHLocator()
-    private let preferences = UserPreferences()
+    private let preferences: UserPreferences
     private let supervisor = ProcessSupervisor()
+    private lazy var notificationCoordinator = NotificationCoordinator(
+        shouldDeliver: { [weak self] in
+            guard let self else { return false }
+            return DesktopNotificationDeliveryPolicy.shouldDeliver(
+                mode: self.preferences.completionNotificationMode,
+                applicationIsActive: NSApp.isActive,
+                mainWindowIsVisible: self.window?.isVisible ?? false,
+                mainWindowIsMiniaturized: self.window?.isMiniaturized ?? false
+            )
+        },
+        shouldPresentWhenActive: { [weak self] in
+            self?.preferences.completionNotificationMode == .always
+        },
+        restoreMainWindow: { [weak self] in
+            self?.restoreMainWindow()
+        }
+    )
 
     private var window: NSWindow?
     private var windowChrome: WindowChromeContainer?
@@ -80,12 +97,24 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var reachableServiceAfterExitHandle: SpawnHandle?
     private var readinessDeadline: ReadinessDeadline?
     private var lastObservedExit: (handle: SpawnHandle, status: ProcessExitStatus)?
+    /// 只有本次 App 用 `--patch` 创建并仍保持 owned 语义的 DSH，才获得原生通知桥。
+    /// 已存在或后继 external 服务即使显示在 WebView 中，也不能请求 App 通知。
+    private var notificationBridgeEnabled = false
+    /// 记录哪一个直接子进程带着 App 私有覆盖层启动。若它在网页就绪前退出，
+    /// App 只自动重试一次不带插件的标准 DSH，避免提醒功能约束 DSH 升级。
+    private var notificationOverlayHandle: SpawnHandle?
+    private var skipNotificationPluginForNextSpawn = false
     /// 已处理过失权的 handle 不再重复 probe；停止权一旦撤销，绝不恢复。
     private var ownershipLossReconciledHandle: SpawnHandle?
 
-    init(bundleIdentifier: String, instanceLock: SingleInstanceLock) {
+    init(
+        bundleIdentifier: String,
+        instanceLock: SingleInstanceLock,
+        preferences: UserPreferences
+    ) {
         self.bundleIdentifier = bundleIdentifier
         self.instanceLock = instanceLock
+        self.preferences = preferences
         super.init()
     }
 
@@ -124,12 +153,20 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     func beginStartup() {
         startupTask?.cancel()
+        setNotificationBridgeEnabled(false)
+        notificationOverlayHandle = nil
         operationGeneration &+= 1
         let generation = operationGeneration
         presentation = .checking
         startupTask = Task { [weak self] in
             await self?.runStartup(generation: generation)
         }
+    }
+
+    /// 通知授权是 App 级偏好，而不是网页初始化副作用。首次打开 App 就询问一次，
+    /// 后续是否真正投递仍严格受“本次 App 托管的 DSH + 私有插件”约束。
+    func prepareNotificationAuthorization() {
+        notificationCoordinator.activateIfNeeded()
     }
 
     func retry() {
@@ -276,7 +313,18 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
 
-        let spec = LaunchEnvironment.makeSpec(executable: executable)
+        let baseEnvironment = ProcessInfo.processInfo.environment
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let notificationPatchURL = prepareNotificationPlugin(
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory
+        )
+        let spec = LaunchEnvironment.makeSpec(
+            executable: executable,
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory,
+            notificationPatchURL: notificationPatchURL
+        )
         // 此门控必须早于任何 pipe、attr 或 posix_spawn 资源准备。
         terminationGate = .spawnTransaction
         presentation = .starting
@@ -290,6 +338,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 return
             }
             currentHandle = handle
+            notificationOverlayHandle = notificationPatchURL == nil ? nil : handle
             reconciledExitedHandle = nil
             reachableServiceAfterExitHandle = nil
             lastObservedExit = nil
@@ -310,6 +359,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             }
         } catch {
             terminationGate = .clear
+            notificationOverlayHandle = nil
+            setNotificationBridgeEnabled(false)
             presentation = .launchFailed(describe(error))
             await continueDeferredTerminationAfterSpawnIfNeeded()
         }
@@ -389,6 +440,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
 
         ownershipLossReconciledHandle = handle
+        setNotificationBridgeEnabled(false)
         terminationGate = .cleanupPending
         clearReadinessDeadline(for: handle)
         let result = await probe.probe()
@@ -403,13 +455,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private func showWebContainer(reloadExisting: Bool = false) {
         if let webContainer {
+            webContainer.setNotificationBridgeEnabled(notificationBridgeEnabled)
             if reloadExisting {
                 webContainer.loadLocalService()
             }
             presentation = .ready
             return
         }
-        let container = WebContainer()
+        let container = WebContainer(notificationCoordinator: notificationCoordinator)
+        container.setNotificationBridgeEnabled(notificationBridgeEnabled)
         container.onChromeStyleChange = { [weak self] style in
             self?.windowChrome?.apply(style: style)
         }
@@ -503,10 +557,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             // 端口在 spawn 后被其他服务占用。保留直接子进程凭据，
             // 但绝不把该网页服务或其监听者认定为 owned。
             terminationGate = .stoppable
+            setNotificationBridgeEnabled(false)
             clearReadinessDeadline(for: handle)
             presentation = .portConflict
 
         case .ownershipLost:
+            setNotificationBridgeEnabled(false)
             terminationGate = .cleanupPending
             clearReadinessDeadline(for: handle)
             await presentExternalServiceAfterOwnershipLoss(result)
@@ -520,6 +576,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     /// 身份或监听复核失败后，端口页面一律按 external 重新处理。
     private func presentExternalServiceAfterOwnershipLoss(_ result: ProbeResult) async {
+        setNotificationBridgeEnabled(false)
         switch result {
         case .dshLikely:
             showWebContainer(reloadExisting: true)
@@ -550,6 +607,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         exitStatus: ProcessExitStatus? = nil
     ) async {
         guard currentHandle == handle else { return }
+        // 主 PID 已退出或已无法可靠确认；端口上即使仍有页面，也只能按 external 处理。
+        setNotificationBridgeEnabled(false)
         if let exitStatus {
             lastObservedExit = (handle: handle, status: exitStatus)
         }
@@ -597,7 +656,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                         generation: generation,
                         exitStatus: effectiveExitStatus
                     )
-                } else {
+                } else if !retryWithoutNotificationPluginIfNeeded(handle: handle) {
                     presentCompletedExitWithoutReachableServiceIfNeeded(effectiveExitStatus)
                 }
             }
@@ -630,7 +689,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         case .unavailable:
             if cleanupComplete {
                 clearReadinessDeadline(for: handle)
-                presentCompletedExitWithoutReachableServiceIfNeeded(effectiveExitStatus)
+                if !retryWithoutNotificationPluginIfNeeded(handle: handle) {
+                    presentCompletedExitWithoutReachableServiceIfNeeded(effectiveExitStatus)
+                }
             } else {
                 presentation = .drainingCleanup
             }
@@ -672,6 +733,61 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         presentation = .launchFailed(
             "本次 dsh 在服务就绪前退出（\(exitStatusText(exitStatus))）。可查看本次内存日志。"
         )
+    }
+
+    /// 找到 bundle 内完整的已构建插件后，才建立 DSH 的 resolver 链接并启用
+    /// 本次启动覆盖层。准备失败不妨碍薄壳的核心启动路径，只会安全地没有提醒。
+    private func prepareNotificationPlugin(
+        baseEnvironment: [String: String],
+        homeDirectory: URL
+    ) -> URL? {
+        if skipNotificationPluginForNextSpawn {
+            skipNotificationPluginForNextSpawn = false
+            setNotificationBridgeEnabled(false)
+            return nil
+        }
+        guard let resourceRoot = Bundle.main.resourceURL,
+              let plugin = DSHNotificationPlugin(
+                directory: resourceRoot.appendingPathComponent(
+                    DSHNotificationPlugin.resourcesDirectoryName,
+                    isDirectory: true
+                )
+              ) else {
+            setNotificationBridgeEnabled(false)
+            return nil
+        }
+
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: baseEnvironment,
+                workingDirectory: homeDirectory,
+                homeDirectory: homeDirectory
+            )
+            setNotificationBridgeEnabled(true)
+            return plugin.patchURL
+        } catch {
+            setNotificationBridgeEnabled(false)
+            return nil
+        }
+    }
+
+    private func setNotificationBridgeEnabled(_ enabled: Bool) {
+        notificationBridgeEnabled = enabled
+        webContainer?.setNotificationBridgeEnabled(enabled)
+    }
+
+    /// 覆盖层只要让 DSH 在页面就绪前失败一次，就退回标准启动命令。此路径没有
+    /// 轮询或守护进程：它复用原有的退出收敛后启动流程，而且每次失败只尝试一次。
+    private func retryWithoutNotificationPluginIfNeeded(handle: SpawnHandle) -> Bool {
+        guard notificationOverlayHandle == handle,
+              webContainer == nil,
+              !quitPending else {
+            return false
+        }
+        notificationOverlayHandle = nil
+        skipNotificationPluginForNextSpawn = true
+        beginStartup()
+        return true
     }
 
     private func exitStatusText(_ status: ProcessExitStatus) -> String {

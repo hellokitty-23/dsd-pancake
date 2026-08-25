@@ -35,6 +35,10 @@ struct DSHDesktopVerification {
             try verifyLocatorAndEnvironment()
         } failures: { failures.append($0) }
 
+        await run("App 私有提醒插件与桥协议") {
+            try verifyNotificationPluginAndBridgeProtocol()
+        } failures: { failures.append($0) }
+
         await run("SIGCHLD 与单实例锁") {
             try verifySIGCHLDDispositionAndSingleInstanceLock()
         } failures: { failures.append($0) }
@@ -209,9 +213,260 @@ struct DSHDesktopVerification {
         let fallbackSpec = LaunchEnvironment.makeSpec(executable: executable, baseEnvironment: [:])
         try expect(fallbackSpec.environment["HOME"] == FileManager.default.homeDirectoryForCurrentUser.path, "缺失 HOME 时未使用用户主目录")
         try expect(!(fallbackSpec.environment["TMPDIR"] ?? "").isEmpty, "缺失 TMPDIR 时未填充临时目录")
+        let patchURL = URL(fileURLWithPath: "/tmp/dsd-pancake-notifications.yml")
+        let patchedSpec = LaunchEnvironment.makeSpec(
+            executable: executable,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": "/tmp/dshd-home"],
+            homeDirectory: URL(fileURLWithPath: "/tmp/dshd-home", isDirectory: true),
+            notificationPatchURL: patchURL
+        )
+        try expect(
+            patchedSpec.arguments == [
+                "--profile", "web",
+                "--patch", patchURL.path,
+                "--no-open",
+                "--host", "127.0.0.1",
+                "--port", "3080",
+            ],
+            "带提醒覆盖层时没有使用 DSH launcher 的 --profile/--patch 参数"
+        )
         try expect(
             DSHLocator().locate(lastChosenPath: echoURL.path)?.url == echoURL,
             "用户上次选择路径未优先于固定候选路径"
+        )
+    }
+
+    private static func verifyNotificationPluginAndBridgeProtocol() throws {
+        let replyEvent = DesktopNotificationEvent(eventID: "reply:session-1:42", kind: .reply)
+        try expect(replyEvent != nil, "有效提醒事件 ID 被拒绝")
+        let expectedReply = DesktopNotificationBridgeAction.notify(replyEvent!)
+        let replyBody: [String: Any] = [
+            "version": NSNumber(value: DesktopNotificationBridge.protocolVersion),
+            "action": "notify",
+            "eventID": "reply:session-1:42",
+            "kind": "reply",
+        ]
+        try expect(DesktopNotificationBridge.decode(replyBody) == expectedReply, "有效 reply 桥事件未被解析")
+        try expect(
+            DesktopNotificationBridge.decode([
+                "version": NSNumber(value: true),
+                "action": "capabilities",
+            ]) == nil,
+            "Boolean 被错误接受为协议版本"
+        )
+        try expect(
+            DesktopNotificationBridge.decode([
+                "version": NSNumber(value: DesktopNotificationBridge.protocolVersion),
+                "action": "capabilities",
+                "extra": "forbidden",
+            ]) == nil,
+            "未知桥字段未被拒绝"
+        )
+        try expect(
+            DesktopNotificationBridge.decode([
+                "version": NSNumber(value: DesktopNotificationBridge.protocolVersion),
+                "action": "notify",
+                "eventID": "含有自由文本",
+                "kind": "reply",
+            ]) == nil,
+            "自由文本事件 ID 未被拒绝"
+        )
+        try expect(
+            DesktopNotificationKind.goalComplete.body == "任务已完成"
+                && DesktopNotificationKind.goalBlocked.body == "任务需要你处理",
+            "通知正文不应从网页携带内容"
+        )
+        try expect(
+            !DesktopNotificationPresentationPolicy.shouldPresent(
+                applicationIsActive: true,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: false
+            ),
+            "前台可见窗口仍会显示重复提醒"
+        )
+        try expect(
+            DesktopNotificationPresentationPolicy.shouldPresent(
+                applicationIsActive: true,
+                mainWindowIsVisible: false,
+                mainWindowIsMiniaturized: false
+            ) && DesktopNotificationPresentationPolicy.shouldPresent(
+                applicationIsActive: false,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: false
+            ) && DesktopNotificationPresentationPolicy.shouldPresent(
+                applicationIsActive: true,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: true
+            ),
+            "窗口隐藏、失焦或最小化时应允许提醒"
+        )
+        try expect(
+            !DesktopNotificationDeliveryPolicy.shouldDeliver(
+                mode: .never,
+                applicationIsActive: false,
+                mainWindowIsVisible: false,
+                mainWindowIsMiniaturized: false
+            ),
+            "永不模式仍允许投递"
+        )
+        try expect(
+            DesktopNotificationDeliveryPolicy.shouldDeliver(
+                mode: .whenUnfocused,
+                applicationIsActive: false,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: false
+            ),
+            "仅在未聚焦时模式错误阻断失焦提醒"
+        )
+        try expect(
+            !DesktopNotificationDeliveryPolicy.shouldDeliver(
+                mode: .whenUnfocused,
+                applicationIsActive: true,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: false
+            ),
+            "仅在未聚焦时模式错误允许前台可见提醒"
+        )
+        try expect(
+            DesktopNotificationDeliveryPolicy.shouldDeliver(
+                mode: .always,
+                applicationIsActive: true,
+                mainWindowIsVisible: true,
+                mainWindowIsMiniaturized: false
+            ),
+            "一律模式错误阻断前台可见提醒"
+        )
+
+        var recent = RecentNotificationEventIDs(capacity: 2)
+        try expect(recent.insertIfNew("one"), "首个事件未被接受")
+        try expect(!recent.insertIfNew("one"), "重复事件未去重")
+        try expect(recent.insertIfNew("two") && recent.insertIfNew("three"), "有界去重未接受新事件")
+        try expect(recent.insertIfNew("one"), "超出容量后最旧事件未允许重新出现")
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("dsd-pancake-notification-plugin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let pluginDirectory = root.appendingPathComponent("plugin", isDirectory: true)
+        try fileManager.createDirectory(
+            at: pluginDirectory.appendingPathComponent("lib", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data("{\"name\":\"@dsd-pancake/dsh-desktop-notifications\"}".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("package.json"))
+        try Data("[]\n".utf8).write(to: pluginDirectory.appendingPathComponent("cordis.patch.yml"))
+        try Data("export function apply() {}\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/index.js"))
+        try Data("window.__ModuleLoader__.load({})\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/client.js"))
+
+        guard let plugin = DSHNotificationPlugin(directory: pluginDirectory) else {
+            throw VerificationError("完整的 App 私有提醒插件未被识别")
+        }
+        let workingDirectory = root.appendingPathComponent("workspace", isDirectory: true)
+        let homeDirectory = root.appendingPathComponent("home", isDirectory: true)
+        let configuredHome = root.appendingPathComponent("dsh-home", isDirectory: true)
+        try plugin.prepareResolver(
+            baseEnvironment: ["DSH_HOME": configuredHome.path],
+            workingDirectory: workingDirectory,
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )
+        let resolverLink = configuredHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
+        let linkedPath = try fileManager.destinationOfSymbolicLink(atPath: resolverLink.path)
+        try expect(
+            URL(fileURLWithPath: linkedPath, isDirectory: true).standardizedFileURL == pluginDirectory.standardizedFileURL,
+            "提醒插件 resolver 链接未指向 App 私有插件"
+        )
+        try plugin.prepareResolver(
+            baseEnvironment: ["DSH_HOME": configuredHome.path],
+            workingDirectory: workingDirectory,
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )
+        try expect(plugin.patchURL.lastPathComponent == "cordis.patch.yml", "提醒覆盖层路径不正确")
+
+        try expect(
+            DSHNotificationPlugin.resolveDSHHome(
+                baseEnvironment: ["DSH_HOME": "relative-home"],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory
+            ) == workingDirectory.appendingPathComponent("relative-home", isDirectory: true).standardizedFileURL,
+            "相对 DSH_HOME 没有按 DSH 工作目录解析"
+        )
+        try expect(
+            DSHNotificationPlugin.resolveDSHHome(
+                baseEnvironment: ["DSH_HOME": "~/custom-dsh"],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory
+            ) == homeDirectory.appendingPathComponent("custom-dsh", isDirectory: true).standardizedFileURL,
+            "波浪号 DSH_HOME 没有按用户目录展开"
+        )
+
+        let occupiedHome = root.appendingPathComponent("occupied-home", isDirectory: true)
+        let occupiedPath = occupiedHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
+        try fileManager.createDirectory(at: occupiedPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not a symlink".utf8).write(to: occupiedPath)
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: ["DSH_HOME": occupiedHome.path],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory,
+                fileManager: fileManager
+            )
+            throw VerificationError("占用的 resolver 路径被错误覆盖")
+        } catch let error as DSHNotificationPluginError {
+            guard case .resolverPathOccupied = error else {
+                throw VerificationError("占用 resolver 路径返回了错误类型：\(error)")
+            }
+        }
+
+        let foreignHome = root.appendingPathComponent("foreign-link-home", isDirectory: true)
+        let foreignTarget = root.appendingPathComponent("foreign-plugin", isDirectory: true)
+        try fileManager.createDirectory(at: foreignTarget, withIntermediateDirectories: true)
+        try Data("{\"name\":\"@someone-else/plugin\"}".utf8)
+            .write(to: foreignTarget.appendingPathComponent("package.json"))
+        let foreignLink = foreignHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
+        try fileManager.createDirectory(at: foreignLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: foreignLink.path, withDestinationPath: foreignTarget.path)
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: ["DSH_HOME": foreignHome.path],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory,
+                fileManager: fileManager
+            )
+            throw VerificationError("未知 resolver 符号链接被错误覆盖")
+        } catch let error as DSHNotificationPluginError {
+            guard case .resolverPathOccupied = error else {
+                throw VerificationError("未知 resolver 符号链接返回了错误类型：\(error)")
+            }
+        }
+        try expect(
+            try fileManager.destinationOfSymbolicLink(atPath: foreignLink.path) == foreignTarget.path,
+            "未知 resolver 符号链接被修改"
+        )
+
+        let staleHome = root.appendingPathComponent("stale-link-home", isDirectory: true)
+        let staleLink = staleHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
+        try fileManager.createDirectory(at: staleLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(
+            atPath: staleLink.path,
+            withDestinationPath: root.appendingPathComponent("missing-old-app-plugin").path
+        )
+        try plugin.prepareResolver(
+            baseEnvironment: ["DSH_HOME": staleHome.path],
+            workingDirectory: workingDirectory,
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )
+        try expect(
+            try fileManager.destinationOfSymbolicLink(atPath: staleLink.path) == pluginDirectory.path,
+            "移动 App 后的失效 resolver 链接未被修复"
         )
     }
 
@@ -226,9 +481,15 @@ struct DSHDesktopVerification {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("dshdesktop-lock-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let first = try SingleInstanceLock.acquire(bundleIdentifier: "io.github.dshdesktop.verification", rootDirectory: root)
+        let first = try SingleInstanceLock.acquire(
+            bundleIdentifier: "io.github.hellokitty-23.dsd-pancake.verification",
+            rootDirectory: root
+        )
         try expect(first != nil, "首实例未能取得测试锁")
-        let second = try SingleInstanceLock.acquire(bundleIdentifier: "io.github.dshdesktop.verification", rootDirectory: root)
+        let second = try SingleInstanceLock.acquire(
+            bundleIdentifier: "io.github.hellokitty-23.dsd-pancake.verification",
+            rootDirectory: root
+        )
         try expect(second == nil, "第二实例错误取得了启动权")
         withExtendedLifetime(first) {}
     }
@@ -754,7 +1015,7 @@ struct DSHDesktopVerification {
         try FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fixtureRoot) }
 
-        let bundleIdentifier = "io.github.dshdesktop.lock-inheritance"
+        let bundleIdentifier = "io.github.hellokitty-23.dsd-pancake.lock-inheritance"
         var lock: SingleInstanceLock? = try SingleInstanceLock.acquire(
             bundleIdentifier: bundleIdentifier,
             rootDirectory: fixtureRoot

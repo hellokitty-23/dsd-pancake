@@ -29,8 +29,11 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     private let navigationPolicy = WebNavigationPolicy()
     private let userContentController: WKUserContentController
+    private let notificationCoordinator: NotificationCoordinator
     private var chromeStyleMessageHandler: ChromeStyleMessageHandler?
+    private var notificationMessageHandler: NotificationMessageHandler?
     private var navigationMessageDismissalTask: Task<Void, Never>?
+    private var notificationBridgeEnabled = false
     private var chromeStyle: ChromeSurfaceStyle? {
         didSet {
             guard chromeStyle != oldValue else { return }
@@ -38,7 +41,8 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
     }
 
-    override init() {
+    init(notificationCoordinator: NotificationCoordinator) {
+        self.notificationCoordinator = notificationCoordinator
         let configuration = WKWebViewConfiguration()
         userContentController = WKUserContentController()
         configuration.userContentController = userContentController
@@ -52,6 +56,14 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         let messageHandler = ChromeStyleMessageHandler(container: self)
         chromeStyleMessageHandler = messageHandler
         userContentController.add(messageHandler, name: ChromeStyleBridge.messageName)
+
+        let notificationHandler = NotificationMessageHandler(container: self)
+        notificationMessageHandler = notificationHandler
+        userContentController.addScriptMessageHandler(
+            notificationHandler,
+            contentWorld: .page,
+            name: DesktopNotificationBridge.messageName
+        )
         userContentController.addUserScript(
             WKUserScript(
                 source: ChromeStyleBridge.script,
@@ -66,6 +78,12 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
+    }
+
+    /// 是否启用由 AppCoordinator 的 DSH 所有权与 `--patch` 启动结果决定。handler
+    /// 固定注册但默认拒绝，避免已存在的网页服务意外获得原生通知能力。
+    func setNotificationBridgeEnabled(_ enabled: Bool) {
+        notificationBridgeEnabled = enabled
     }
 
     func loadLocalService() {
@@ -178,6 +196,19 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         chromeStyle = style
     }
 
+    fileprivate func receiveNotificationMessage(
+        _ body: Any,
+        frameInfo: WKFrameInfo
+    ) async -> [String: Any]? {
+        guard notificationBridgeEnabled,
+              frameInfo.isMainFrame,
+              isLocalServiceOrigin(frameInfo.securityOrigin),
+              let action = DesktopNotificationBridge.decode(body) else {
+            return nil
+        }
+        return await notificationCoordinator.handle(action)
+    }
+
     private func resetChromeStyle() {
         chromeStyle = nil
     }
@@ -188,6 +219,12 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             return
         }
         showTransientNavigationMessage("已在默认浏览器打开你点击的外部链接。")
+    }
+
+    private func isLocalServiceOrigin(_ origin: WKSecurityOrigin) -> Bool {
+        origin.protocol == LocalService.url.scheme
+            && origin.host == LocalService.host
+            && origin.port == LocalService.port
     }
 
     private func showTransientNavigationMessage(_ text: String) {
@@ -240,6 +277,34 @@ private final class ChromeStyleMessageHandler: NSObject, WKScriptMessageHandler 
         guard message.name == ChromeStyleBridge.messageName else { return }
         Task { @MainActor [weak container] in
             container?.receiveChromeStyleMessage(message.body)
+        }
+    }
+}
+
+@MainActor
+private final class NotificationMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
+    weak var container: WebContainer?
+
+    init(container: WebContainer) {
+        self.container = container
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping @MainActor (Any?, String?) -> Void
+    ) {
+        guard message.name == DesktopNotificationBridge.messageName else {
+            replyHandler(nil, "Unexpected script message name")
+            return
+        }
+
+        Task { @MainActor [weak container] in
+            guard let container else {
+                replyHandler(nil, "Notification bridge is unavailable")
+                return
+            }
+            replyHandler(await container.receiveNotificationMessage(message.body, frameInfo: message.frameInfo), nil)
         }
     }
 }

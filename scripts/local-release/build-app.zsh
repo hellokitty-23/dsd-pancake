@@ -5,6 +5,7 @@ set -euo pipefail
 script_dir=${0:A:h}
 project_root=${script_dir:h:h}
 resources_dir="$project_root/Resources"
+notification_plugin_dir="$project_root/Plugins/dsd-pancake-notifications"
 output_dir="${DSHD_OUTPUT_DIR:-$project_root/local-release}"
 app_path="$output_dir/DSD Pancake.app"
 archive_path="$output_dir/DSD Pancake.app.zip"
@@ -25,10 +26,16 @@ fi
 for required_path in \
     "$resources_dir/Info.plist" \
     "$resources_dir/AppIcon.png" \
+    "$resources_dir/DockIcon.png" \
+    "$notification_plugin_dir/package.json" \
+    "$notification_plugin_dir/cordis.patch.yml" \
+    "$notification_plugin_dir/lib/index.js" \
+    "$notification_plugin_dir/lib/client.js" \
     /usr/bin/swift \
     /usr/bin/sips \
     /usr/bin/iconutil \
     /usr/bin/ditto \
+    /usr/bin/codesign \
     /usr/bin/plutil \
     /usr/libexec/PlistBuddy; do
     if [[ ! -x "$required_path" && ! -f "$required_path" ]]; then
@@ -47,27 +54,50 @@ if [[ ! -x "$executable_path" ]]; then
     exit 1
 fi
 
-mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources/DSHNotifications/lib"
 /usr/bin/ditto "$executable_path" "$app_path/Contents/MacOS/DSHDesktop"
 /usr/bin/ditto "$resources_dir/Info.plist" "$app_path/Contents/Info.plist"
+/usr/bin/ditto "$notification_plugin_dir/package.json" "$app_path/Contents/Resources/DSHNotifications/package.json"
+/usr/bin/ditto "$notification_plugin_dir/cordis.patch.yml" "$app_path/Contents/Resources/DSHNotifications/cordis.patch.yml"
+/usr/bin/ditto "$notification_plugin_dir/lib/index.js" "$app_path/Contents/Resources/DSHNotifications/lib/index.js"
+/usr/bin/ditto "$notification_plugin_dir/lib/client.js" "$app_path/Contents/Resources/DSHNotifications/lib/client.js"
 
-iconset_path="$temporary_dir/AppIcon.iconset"
-png_path="$temporary_dir/AppIcon-1024.png"
-mkdir -p "$iconset_path"
-/usr/bin/sips -s format png "$resources_dir/AppIcon.png" --out "$png_path" >/dev/null
-/usr/bin/sips -z 16 16 "$png_path" --out "$iconset_path/icon_16x16.png" >/dev/null
-/usr/bin/sips -z 32 32 "$png_path" --out "$iconset_path/icon_16x16@2x.png" >/dev/null
-/usr/bin/sips -z 32 32 "$png_path" --out "$iconset_path/icon_32x32.png" >/dev/null
-/usr/bin/sips -z 64 64 "$png_path" --out "$iconset_path/icon_32x32@2x.png" >/dev/null
-/usr/bin/sips -z 128 128 "$png_path" --out "$iconset_path/icon_128x128.png" >/dev/null
-/usr/bin/sips -z 256 256 "$png_path" --out "$iconset_path/icon_128x128@2x.png" >/dev/null
-/usr/bin/sips -z 256 256 "$png_path" --out "$iconset_path/icon_256x256.png" >/dev/null
-/usr/bin/sips -z 512 512 "$png_path" --out "$iconset_path/icon_256x256@2x.png" >/dev/null
-/usr/bin/sips -z 512 512 "$png_path" --out "$iconset_path/icon_512x512.png" >/dev/null
-/usr/bin/sips -z 1024 1024 "$png_path" --out "$iconset_path/icon_512x512@2x.png" >/dev/null
-/usr/bin/iconutil -c icns "$iconset_path" -o "$app_path/Contents/Resources/AppIcon.icns"
+# `PancakeAppIcon` 是 bundle 主图标，供 Finder 和原生通知的 App 身份使用。
+# 它刻意不复用历史的 `AppIcon` 资源键，以便 macOS 在替换本地 App 后重新解析
+# 原生通知图标；源素材仍保持为 `Resources/AppIcon.png`。
+# `DockIcon` 仅在运行时交给 AppKit 显示在 Dock；两套资源必须独立生成，
+# 避免为小尺寸通知调整留白时意外缩小 Dock 的可见主体。
+build_icns() {
+    local source_path="$1"
+    local icon_name="$2"
+    local iconset_path="$temporary_dir/${icon_name}.iconset"
+    local png_path="$temporary_dir/${icon_name}-1024.png"
+
+    mkdir -p "$iconset_path"
+    /usr/bin/sips -s format png "$source_path" --out "$png_path" >/dev/null
+    /usr/bin/sips -z 16 16 "$png_path" --out "$iconset_path/icon_16x16.png" >/dev/null
+    /usr/bin/sips -z 32 32 "$png_path" --out "$iconset_path/icon_16x16@2x.png" >/dev/null
+    /usr/bin/sips -z 32 32 "$png_path" --out "$iconset_path/icon_32x32.png" >/dev/null
+    /usr/bin/sips -z 64 64 "$png_path" --out "$iconset_path/icon_32x32@2x.png" >/dev/null
+    /usr/bin/sips -z 128 128 "$png_path" --out "$iconset_path/icon_128x128.png" >/dev/null
+    /usr/bin/sips -z 256 256 "$png_path" --out "$iconset_path/icon_128x128@2x.png" >/dev/null
+    /usr/bin/sips -z 256 256 "$png_path" --out "$iconset_path/icon_256x256.png" >/dev/null
+    /usr/bin/sips -z 512 512 "$png_path" --out "$iconset_path/icon_256x256@2x.png" >/dev/null
+    /usr/bin/sips -z 512 512 "$png_path" --out "$iconset_path/icon_512x512.png" >/dev/null
+    /usr/bin/sips -z 1024 1024 "$png_path" --out "$iconset_path/icon_512x512@2x.png" >/dev/null
+    /usr/bin/iconutil -c icns "$iconset_path" -o "$app_path/Contents/Resources/${icon_name}.icns"
+}
+
+build_icns "$resources_dir/AppIcon.png" "PancakeAppIcon"
+build_icns "$resources_dir/DockIcon.png" "DockIcon"
 
 /usr/bin/plutil -lint "$app_path/Contents/Info.plist"
+# 不使用开发者证书、Apple 账号或公证；`-` 是本机 ad-hoc（无身份）签名。
+# 它在组装完成后把主程序、Info.plist 与资源绑定为同一个 App 身份，使
+# UserNotifications 能稳定登记 `CFBundleIdentifier`。这不是对外分发签名。
+/usr/bin/codesign --force --sign - "$app_path"
+/usr/bin/codesign --verify --deep --strict --verbose=4 "$app_path"
+
 /usr/bin/ditto -c -k --keepParent "$app_path" "$archive_path"
 
 bundle_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/Info.plist")
@@ -83,10 +113,12 @@ fi
 archive_sha256=$(/usr/bin/shasum -a 256 "$archive_path" | /usr/bin/awk '{print $1}')
 executable_sha256=$(/usr/bin/shasum -a 256 "$app_path/Contents/MacOS/DSHDesktop" | /usr/bin/awk '{print $1}')
 architecture=$(/usr/bin/lipo -archs "$app_path/Contents/MacOS/DSHDesktop")
+app_name=${app_path:t}
+archive_name=${archive_path:t}
 
 /usr/bin/plutil -create xml1 "$metadata_path"
-/usr/libexec/PlistBuddy -c "Add :AppPath string $app_path" "$metadata_path"
-/usr/libexec/PlistBuddy -c "Add :ArchivePath string $archive_path" "$metadata_path"
+/usr/libexec/PlistBuddy -c "Add :AppPath string $app_name" "$metadata_path"
+/usr/libexec/PlistBuddy -c "Add :ArchivePath string $archive_name" "$metadata_path"
 /usr/libexec/PlistBuddy -c "Add :BundleIdentifier string $bundle_identifier" "$metadata_path"
 /usr/libexec/PlistBuddy -c "Add :Version string $version" "$metadata_path"
 /usr/libexec/PlistBuddy -c "Add :BuildNumber string $build_number" "$metadata_path"
@@ -94,8 +126,10 @@ architecture=$(/usr/bin/lipo -archs "$app_path/Contents/MacOS/DSHDesktop")
 /usr/libexec/PlistBuddy -c "Add :Architecture string $architecture" "$metadata_path"
 /usr/libexec/PlistBuddy -c "Add :ArchiveSHA256 string $archive_sha256" "$metadata_path"
 /usr/libexec/PlistBuddy -c "Add :ExecutableSHA256 string $executable_sha256" "$metadata_path"
-/usr/libexec/PlistBuddy -c "Add :Signed bool false" "$metadata_path"
+/usr/libexec/PlistBuddy -c "Add :Signed bool true" "$metadata_path"
+/usr/libexec/PlistBuddy -c "Add :SigningMode string adhoc" "$metadata_path"
 
 print "已生成本机 Release App：$app_path"
+print "已完成本机 ad-hoc 签名（无需开发者证书或公证）。"
 print "归档 SHA-256：$archive_sha256"
 print "构建映射：$metadata_path"

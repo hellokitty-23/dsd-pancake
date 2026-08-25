@@ -74,6 +74,47 @@ private final class WindowChromeBackdropView: NSView {
         true
     }
 
+    /// `.fullSizeContentView` 让这层背景占据原生标题栏区域，因此鼠标事件不会再
+    /// 自动落到 AppKit 的标题栏视图。这里恢复标题栏的两项标准行为：单击拖动
+    /// 窗口，双击执行系统“点按标题栏两下”偏好。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        if event.clickCount == 2 {
+            performTitlebarDoubleClickAction(on: window)
+            return
+        }
+
+        window.performDrag(with: event)
+    }
+
+    private func performTitlebarDoubleClickAction(on window: NSWindow) {
+        let defaults = UserDefaults.standard
+        switch defaults.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize":
+            window.performMiniaturize(nil)
+        case "None":
+            break
+        case "Maximize", "Fill", "Zoom":
+            window.performZoom(nil)
+        default:
+            // 兼容旧版 macOS 只保存布尔偏好的情况；没有明确关闭时沿用标题栏
+            // 的传统 zoom（缩放至系统建议尺寸）行为。
+            if defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick") {
+                window.performMiniaturize(nil)
+            } else {
+                window.performZoom(nil)
+            }
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds
         NSColor.windowBackgroundColor.setFill()
