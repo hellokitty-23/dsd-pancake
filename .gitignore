@@ -1,0 +1,28 @@
+.DS_Store
+
+# Swift Package Manager / Xcode
+.build/
+.swiftpm/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+
+# Local release outputs and diagnostics
+/local-release/
+/release/
+/work/
+*.xcarchive
+*.dSYM/
+*.app
+*.zip
+
+# Local configuration and credentials. Keep a deliberately created example file trackable.
+.env
+.env.*
+!.env.example
+
+# Local assistant and private development records
+/.claude/
+/private/
