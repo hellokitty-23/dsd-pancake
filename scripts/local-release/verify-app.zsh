@@ -18,6 +18,13 @@ notification_plugin_package="$notification_plugin_dir/package.json"
 notification_plugin_patch="$notification_plugin_dir/cordis.patch.yml"
 notification_plugin_host="$notification_plugin_dir/lib/index.js"
 notification_plugin_client="$notification_plugin_dir/lib/client.js"
+terminal_plugin_dir="$app_path/Contents/Resources/DSHTerminal"
+terminal_plugin_package="$terminal_plugin_dir/package.json"
+terminal_plugin_patch="$terminal_plugin_dir/cordis.patch.yml"
+terminal_plugin_host="$terminal_plugin_dir/lib/index.js"
+terminal_plugin_client="$terminal_plugin_dir/lib/client.js"
+swifterm_bundle_dir="$app_path/Contents/Resources/SwiftTerm_SwiftTerm.bundle"
+swifterm_shader="$swifterm_bundle_dir/Shaders.metal"
 
 for required_path in \
     "$plist_path" \
@@ -28,7 +35,12 @@ for required_path in \
     "$notification_plugin_package" \
     "$notification_plugin_patch" \
     "$notification_plugin_host" \
-    "$notification_plugin_client"; do
+    "$notification_plugin_client" \
+    "$terminal_plugin_package" \
+    "$terminal_plugin_patch" \
+    "$terminal_plugin_host" \
+    "$terminal_plugin_client" \
+    "$swifterm_shader"; do
     if [[ ! -e "$required_path" ]]; then
         print -u2 "App 包缺少必需文件：$required_path"
         exit 1
@@ -70,8 +82,9 @@ if [[ -n "$unexpected_macos_executable" ]]; then
     exit 1
 fi
 
-# Release bundle 只有主可执行文件、Info.plist、两套图标和一个已构建的 App 私有提醒
-# 插件。严格白名单避免未来意外带入 DSH、Node.js、第三方插件、网页资源或测试夹具。
+# Release bundle 只有主可执行文件、Info.plist、两套图标、两个已构建的 App 私有插件，
+# 以及 SwiftTerm 唯一必要的 Metal shader。严格白名单避免未来意外带入 DSH、Node.js、
+# 第三方插件、网页资源或测试夹具。
 if /usr/bin/find "$notification_plugin_dir" -type f \
     ! -path "$notification_plugin_package" \
     ! -path "$notification_plugin_patch" \
@@ -87,8 +100,45 @@ if /usr/bin/find "$notification_plugin_dir" -type d -name node_modules -print -q
     exit 1
 fi
 
+if /usr/bin/find "$terminal_plugin_dir" -type f \
+    ! -path "$terminal_plugin_package" \
+    ! -path "$terminal_plugin_patch" \
+    ! -path "$terminal_plugin_host" \
+    ! -path "$terminal_plugin_client" \
+    -print -quit | /usr/bin/grep -q .; then
+    print -u2 "终端插件目录中发现不属于发行白名单的文件。"
+    exit 1
+fi
+
+if /usr/bin/find "$terminal_plugin_dir" -type d -name node_modules -print -quit | /usr/bin/grep -q .; then
+    print -u2 "终端插件目录中不应包含 node_modules。"
+    exit 1
+fi
+
+if /usr/bin/find "$swifterm_bundle_dir" -type f ! -path "$swifterm_shader" -print -quit | /usr/bin/grep -q .; then
+    print -u2 "SwiftTerm 资源目录中发现不属于发行白名单的文件。"
+    exit 1
+fi
+
+unexpected_swifterm_entry=$(/usr/bin/find "$swifterm_bundle_dir" -mindepth 1 -maxdepth 1 ! -name 'Shaders.metal' -print -quit)
+if [[ -n "$unexpected_swifterm_entry" ]]; then
+    print -u2 "SwiftTerm 资源目录中发现不属于发行白名单的入口：$unexpected_swifterm_entry"
+    exit 1
+fi
+
+unexpected_swifterm_link=$(/usr/bin/find "$swifterm_bundle_dir" -type l -print -quit)
+if [[ -n "$unexpected_swifterm_link" ]]; then
+    print -u2 "SwiftTerm 资源目录中不应包含符号链接：$unexpected_swifterm_link"
+    exit 1
+fi
+
 if ! /usr/bin/grep -Fq '"name": "@dsd-pancake/dsh-desktop-notifications"' "$notification_plugin_package"; then
     print -u2 "提醒插件 package.json 身份不正确。"
+    exit 1
+fi
+
+if ! /usr/bin/grep -Fq '"name": "@dsd-pancake/dsh-desktop-terminal"' "$terminal_plugin_package"; then
+    print -u2 "终端插件 package.json 身份不正确。"
     exit 1
 fi
 
@@ -102,6 +152,11 @@ unexpected_bundle_file=$(/usr/bin/find "$app_path/Contents" -type f \
     ! -path "$notification_plugin_patch" \
     ! -path "$notification_plugin_host" \
     ! -path "$notification_plugin_client" \
+    ! -path "$terminal_plugin_package" \
+    ! -path "$terminal_plugin_patch" \
+    ! -path "$terminal_plugin_host" \
+    ! -path "$terminal_plugin_client" \
+    ! -path "$swifterm_shader" \
     -print -quit)
 if [[ -n "$unexpected_bundle_file" ]]; then
     print -u2 "App 包中发现不属于薄壳白名单的文件：$unexpected_bundle_file"
@@ -117,4 +172,4 @@ fi
 print "PASS: bundle ID = $bundle_identifier"
 print "PASS: version/build = $version/$build_number"
 print "PASS: architecture = $(/usr/bin/lipo -archs "$executable_path")"
-print "PASS: bundle 已通过本机 ad-hoc 签名校验，且仅含 DSD Pancake 主可执行文件、Info.plist、图标与 App 私有提醒插件；未捆绑 DSH、Node.js、第三方插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"
+print "PASS: bundle 已通过本机 ad-hoc 签名校验，且仅含 DSD Pancake 主可执行文件、Info.plist、图标、两个 App 私有插件与 SwiftTerm Metal 资源；未捆绑 DSH、Node.js、第三方插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"

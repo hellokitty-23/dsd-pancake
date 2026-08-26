@@ -30,7 +30,8 @@ public enum LaunchEnvironment {
         executable: DSHExecutable,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        notificationPatchURL: URL? = nil
+        notificationPatchURL: URL? = nil,
+        terminalPatchURL: URL? = nil
     ) -> LaunchSpec {
         var environment = baseEnvironment
         let executableDirectory = executable.url.deletingLastPathComponent().path
@@ -42,7 +43,10 @@ public enum LaunchEnvironment {
 
         return LaunchSpec(
             executable: executable.url,
-            arguments: launchArguments(notificationPatchURL: notificationPatchURL),
+            arguments: launchArguments(
+                notificationPatchURL: notificationPatchURL,
+                terminalPatchURL: terminalPatchURL
+            ),
             workingDirectory: homeDirectory,
             environment: environment
         )
@@ -50,15 +54,22 @@ public enum LaunchEnvironment {
 
     /// `--patch` 属于 DSH launcher，而不是 `web` 子命令；有覆盖层时必须使用
     /// `--profile web` 形式，才能让覆盖层只附着于本次启动。
-    public static func launchArguments(notificationPatchURL: URL?) -> [String] {
-        guard let notificationPatchURL else { return requiredArguments }
-        return [
-            "--profile", "web",
-            "--patch", notificationPatchURL.path,
-            "--no-open",
-            "--host", LocalService.host,
-            "--port", "\(LocalService.port)",
-        ]
+    public static func launchArguments(
+        notificationPatchURL: URL? = nil,
+        terminalPatchURL: URL? = nil
+    ) -> [String] {
+        let patches = [notificationPatchURL, terminalPatchURL].compactMap { $0 }
+        guard !patches.isEmpty else { return requiredArguments }
+
+        // `--patch` 属于 launcher 级选项，允许为同一次 App 私有启动附加多个独立
+        // 覆盖层；两者都不写入用户的 Web profile。
+        return ["--profile", "web"]
+            + patches.flatMap { ["--patch", $0.path] }
+            + [
+                "--no-open",
+                "--host", LocalService.host,
+                "--port", "\(LocalService.port)",
+            ]
     }
 
     public static func deduplicatedPaths(_ entries: [String]) -> [String] {

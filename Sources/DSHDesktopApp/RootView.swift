@@ -150,7 +150,10 @@ struct RootView: View {
     private var readyView: some View {
         VStack(spacing: 0) {
             if let container = coordinator.webContainer {
-                ReadyWebView(container: container)
+                ReadyWebView(
+                    container: container,
+                    terminalController: coordinator.terminalController
+                )
             } else {
                 progressView(title: "正在准备网页容器", detail: "不会创建第二个 WebView。")
             }
@@ -259,12 +262,16 @@ struct RootView: View {
 
 private struct ReadyWebView: View {
     @ObservedObject var container: WebContainer
+    let terminalController: DesktopTerminalController
 
     var body: some View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
 
-            WebContainerHost(container: container)
+            TerminalDockHost(
+                container: container,
+                terminalController: terminalController
+            )
                 .opacity(container.isPageLoading ? 0 : 1)
                 .allowsHitTesting(!container.isPageLoading)
 

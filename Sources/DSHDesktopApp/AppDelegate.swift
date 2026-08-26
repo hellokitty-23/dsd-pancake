@@ -62,7 +62,7 @@ private enum DSHCheckResult {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var coordinator: AppCoordinator?
     private let preferences = UserPreferences()
     private let appUpdateService = AppUpdateService()
@@ -137,6 +137,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(closeItem)
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
+
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "视图")
+        let terminalItem = NSMenuItem(
+            title: "显示/隐藏终端",
+            action: #selector(toggleTerminalPanel(_:)),
+            keyEquivalent: "j"
+        )
+        terminalItem.keyEquivalentModifierMask = [.command]
+        terminalItem.target = self
+        terminalItem.toolTip = "显示/隐藏底部终端 ⌘J"
+        viewMenu.addItem(terminalItem)
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
 
         let messageMenuItem = NSMenuItem()
         let messageMenu = NSMenu(title: "消息")
@@ -425,6 +439,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func closeMainWindow(_ sender: Any?) {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.performClose(sender)
+    }
+
+    @objc private func toggleTerminalPanel(_ sender: Any?) {
+        coordinator?.toggleTerminalPanel()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(toggleTerminalPanel(_:)) else { return true }
+        menuItem.state = coordinator?.isTerminalPanelVisible == true ? .on : .off
+        return coordinator?.canToggleTerminalPanel == true
     }
 
     /// `PancakeAppIcon` 保持为 bundle 身份图标，供 Finder 与原生通知读取；Dock 单独用

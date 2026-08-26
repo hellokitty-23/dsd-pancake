@@ -1,16 +1,15 @@
 import Foundation
 
-/// DSD Pancake 自带的完成提醒插件。它只作为某次 `dsh --patch` 启动的覆盖层挂载，
-/// 不写入 DSH profile 的 package.json、bundle 列表或 patch 配置。
-public struct DSHNotificationPlugin: Equatable, Sendable {
-    public static let packageName = "@dsd-pancake/dsh-desktop-notifications"
-    public static let resourcesDirectoryName = "DSHNotifications"
+/// DSD Pancake 自带的底部终端插件。它与提醒插件使用同一类 App 私有 resolver，
+/// 但拥有独立 package 和独立 `--patch`，任何普通 `dsh web` 都不会自动加载它。
+public struct DSHTerminalPlugin: Equatable, Sendable {
+    public static let packageName = "@dsd-pancake/dsh-desktop-terminal"
+    public static let resourcesDirectoryName = "DSHTerminal"
 
     private let plugin: DSHPrivatePlugin
 
     public var directory: URL { plugin.directory }
 
-    /// 只接受完整的、已构建的极小插件目录；App 不在运行时编译 JavaScript，也不下载依赖。
     public init?(directory: URL, fileManager: FileManager = .default) {
         guard let plugin = DSHPrivatePlugin(
             packageName: Self.packageName,
@@ -38,25 +37,12 @@ public struct DSHNotificationPlugin: Equatable, Sendable {
                 fileManager: fileManager
             )
         } catch let error as DSHPrivatePluginError {
-            throw DSHNotificationPluginError(error)
+            throw DSHTerminalPluginError(error)
         }
-    }
-
-    /// 与 DSH 的 `resolveDshHome()` 语义对齐：非空 `DSH_HOME` 优先，未设置时回退 `~/.dsh`。
-    public static func resolveDSHHome(
-        baseEnvironment: [String: String],
-        workingDirectory: URL,
-        homeDirectory: URL
-    ) -> URL {
-        DSHPrivatePlugin.resolveDSHHome(
-            baseEnvironment: baseEnvironment,
-            workingDirectory: workingDirectory,
-            homeDirectory: homeDirectory
-        )
     }
 }
 
-public enum DSHNotificationPluginError: LocalizedError, Equatable, Sendable {
+public enum DSHTerminalPluginError: LocalizedError, Equatable, Sendable {
     case resolverPathOccupied(String)
     case preparationFailed(String)
 
@@ -70,9 +56,9 @@ public enum DSHNotificationPluginError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case let .resolverPathOccupied(path):
-            "DSD Pancake 的提醒插件解析路径已被其他文件占用：\(path)"
+            "DSD Pancake 的终端插件解析路径已被其他文件占用：\(path)"
         case let .preparationFailed(message):
-            "无法准备 DSD Pancake 的提醒插件：\(message)"
+            "无法准备 DSD Pancake 的终端插件：\(message)"
         }
     }
 }

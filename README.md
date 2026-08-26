@@ -1,13 +1,14 @@
 # DSD Pancake
 
-DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载一个私有的完成提醒插件；手动运行的普通 DSH 不会加载它。
+DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载独立的完成提醒和底部终端私有插件；手动运行的普通 DSH 不会加载它们。
 
 本项目是独立的本地桌面壳，不打包或分发 DSH，也不是 DSH 的功能分支或官方发布。App 菜单可同时只读检查 DSD Pancake 的 GitHub 正式 Release（发行版）和当前 DSH 的 npm `latest`（最新发行标签）；两项更新都由用户独立选择。
 
 ## 它做什么
 
 - 打开固定的本机地址 `http://127.0.0.1:3080/`；
-- 端口空闲时，调用用户当前安装的 DSH；可用时以该次进程专属的 `--patch` 覆盖层加载 App 私有提醒插件；
+- 端口空闲时，调用用户当前安装的 DSH；可用时以该次进程专属的 `--patch` 覆盖层加载 App 私有插件；
+- 对本次 App 创建且已验证归属的 DSH，在 App 原生标题栏右侧提供底部终端按钮和 `⌘J`；终端仅停靠在右侧主内容区域，并将对话与输入框顶到其上方，左侧工程栏保持完整可见、可操作；
 - 不打开 Terminal.app，不打开默认浏览器；
 - 只会停止当前 App 会话亲自创建、并且仍能验证归属的 DSH 进程；
 - 可从 App 菜单统一检查 DSD Pancake 与 DeepSeek Harness 更新；App 有新版本时只显示下载地址并打开发布页，DSH 只有再次确认后才会更新；
@@ -18,16 +19,27 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 
 在 macOS 菜单栏的 `消息 → 完成提醒` 中可选择投递方式；状态会保留到下次启动。`永不` 阻断新的原生通知，`仅在未聚焦时`（默认）只在 App 不在前台、窗口隐藏或最小化时提醒，`一律` 则在所有状态下提醒。切换不重启 DSH，也不改变 macOS 已授予的通知权限。
 
+## 底部终端
+
+底部终端不是网页中的 Shell（命令解释器）模拟器。网页插件只通过 DSH 正式 `sessions` service（会话服务）取得当前 session 的 `cwd`（工作区路径），并向受限原生 bridge（通信桥）同步当前工作区；显示／收起意图、terminal view（终端视图）和 PTY（伪终端）始终由 App 原生壳处理。原生壳还会单向通知已钳制的 dock 高度，插件仅在 DSH 的正式 composer footer（输入框底部扩展位）渲染不可交互占位，用于把对话流顶到终端上方。
+
+- 点击 App 标题栏右侧终端图标、按 `⌘J` 或通过“视图 → 显示/隐藏终端”切换面板；顶部原生 tab bar（标签栏）显示当前工作区的终端标签，`+` 在当前工作区新建独立 shell，点击标签可切换，标签内 `×` 只结束该 shell，最右 `×` 只收起 dock；终端内容与标签栏之间保留约 12pt 视觉缓冲；
+- 面板默认约 280px、最小约 160px、最高为可用窗口高度的 50%，可拖动分隔线调整；DSH 的左侧工程栏与主内容同属一个 `WKWebView`，因此 WebView 保持全高，而右侧对话流为 dock 预留等高空间，消息和输入框会一起上移，不会被终端覆盖；左侧工程栏不会被终端占据或遮住；
+- 每个有效 workspace 在本次 App 运行中可保留多个独立 shell：切换同工作区的不同 DSH 会话会恢复最后选择的标签，切换到其它工作区绝不显示旧终端；
+- 采用 SwiftTerm `1.20.0` 的 `LocalProcessTerminalView`，由 `forkpty` 提供 ANSI、光标、交互输入、resize（尺寸变化）与 Ctrl-C；App 退出或 DSH ownership（进程归属）丢失时会终止本 App 创建的 PTY process group（进程组）；
+- terminal bridge 只接受本机同源主 frame（主页面）的严格枚举消息；不接受命令、脚本、`eval`、环境变量或任意进程参数，也不记录终端输入、输出或路径；
+- external（外部已有）DSH、普通浏览器和无有效工作区的 session 都没有终端能力。普通浏览器没有 WebKit 原生 bridge，因此插件不会订阅会话或读取工作区数据。
+
 ## 它明确不做什么
 
 - 不打包 DSH 或 Node.js，不自动安装、升级或降级任何依赖，也不改写用户 DSH profile（配置档）的 package、bundle（插件列表）或 patch（覆盖层）配置、数据库或账号数据；
 - 不下载、安装、替换或重启 DSD Pancake 自身；App 更新检查只显示固定 GitHub 项目的正式 Release 版本与下载地址，由用户自行下载安装；
 - 不对手动选择的未知安装、源码 checkout（检出目录）、`npx` 临时运行或 external（外部已有）DSH 执行更新；只有当前可执行文件能解析到同一 npm 的全局 `@deepseek-ai/dsh` 包目录，且用户在弹窗中确认时，才运行固定参数的 npm 更新；
 - 不扫描、接管或停止已存在的本机服务；
-- 不提供通用终端、任意命令执行、多标签页或远程 DSH 管理；
+- 不提供网页可调用的通用终端、任意 bridge 命令执行、远程 DSH 管理或跨工作区共享 shell；唯一的本机终端仅面向当前 owned DSH 的有效 workspace；
 - 不收集遥测数据，也不将网页内容、Cookie 或会话数据写入项目日志。
 
-为让该次 `--patch` 能解析 App 内的私有包，App 只会在 DSH home 的 `profiles/node_modules/@dsd-pancake/` 下维护一个指向自身 bundle 的符号链接；若该精确路径是用户文件或指向实际未知目录的链接，则安全降级为没有提醒的普通启动，不覆盖用户文件。若该 App 保留命名空间中的旧链接已失效，App 会把它修复为当前 bundle，以支持移动或替换 `.app`。
+为让该次 `--patch` 能解析 App 内的私有包，App 只会在 DSH home 的 `profiles/node_modules/@dsd-pancake/` 下维护分别指向提醒和终端 bundle 资源的符号链接；若任一精确路径是用户文件，或符号链接仍指向可访问目录，则仅让对应能力安全降级，绝不覆盖。只有该 App 保留命名空间中的旧链接已失效时，才会把它修复为当前 bundle，以支持移动或替换 `.app`。
 
 ## 前置条件
 
@@ -35,7 +47,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 - 可用的 Swift Command Line Tools；
 - 已独立安装可运行的 `dsh`，以及该 DSH 所需的 Node.js 环境。
 
-当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒插件的兼容性是两件事：提醒集成不可用时基础 Web UI 仍可能正常工作；只有带提醒覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带提醒覆盖层的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍与提醒插件兼容。
+当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／终端插件的兼容性是两件事：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
 
 App 会依次检查上次手动选择的可执行文件、`/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。找不到时，界面会让用户手动选择现有的 `dsh` 可执行文件。
 
@@ -79,7 +91,7 @@ zsh scripts/local-release/build-release.zsh
 ```text
 Sources/                    macOS 应用层、核心服务层与受控验证器
 Resources/                  Info.plist、通知／Finder 图标与独立 Dock 图标
-Plugins/                    随 App 打包的私有 DSH 完成提醒插件
+Plugins/                    随 App 打包的私有 DSH 完成提醒与底部终端插件
 scripts/                    受控验证、本地 .app 打包与结构校验
 docs/                       公开架构与使用文档
 ```
@@ -89,3 +101,5 @@ docs/                       公开架构与使用文档
 ## 许可证
 
 本项目采用 [MIT License](./LICENSE)。
+
+运行时终端模拟器 SwiftTerm `1.20.0` 采用 MIT License；版权与完整文本见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。

@@ -87,9 +87,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.restoreMainWindow()
         }
     )
+    let terminalController = DesktopTerminalController()
 
     private var window: NSWindow?
     private var windowChrome: WindowChromeContainer?
+    private weak var terminalTitlebarButton: NSButton?
+    private var terminalTitlebarAccessory: NSTitlebarAccessoryViewController?
     private var currentHandle: SpawnHandle?
     private var operationGeneration: UInt64 = 0
     private var startupTask: Task<Void, Never>?
@@ -109,10 +112,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     /// 只有本次 App 用 `--patch` 创建并仍保持 owned 语义的 DSH，才获得原生通知桥。
     /// 已存在或后继 external 服务即使显示在 WebView 中，也不能请求 App 通知。
     private var notificationBridgeEnabled = false
+    /// 终端 bridge 必须比通知更严格：仅在私有 terminal patch 已随本次 owned DSH
+    /// 启动，并且 listener 归属复核通过后才可能为 true。
+    private var terminalBridgeEnabled = false
     /// 记录哪一个直接子进程带着 App 私有覆盖层启动。若它在网页就绪前退出，
     /// App 只自动重试一次不带插件的标准 DSH，避免提醒功能约束 DSH 升级。
     private var notificationOverlayHandle: SpawnHandle?
     private var skipNotificationPluginForNextSpawn = false
+    private var terminalOverlayHandle: SpawnHandle?
+    private var skipTerminalPluginForNextSpawn = false
     /// 已处理过失权的 handle 不再重复 probe；停止权一旦撤销，绝不恢复。
     private var ownershipLossReconciledHandle: SpawnHandle?
     /// 只有菜单中的显式更新确认可以进入此状态。它与 AppKit 退出事务互斥，
@@ -132,6 +140,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         self.instanceLock = instanceLock
         self.preferences = preferences
         super.init()
+        terminalController.onStateChange = { [weak self] _, _ in
+            self?.updateTerminalTitlebarControl()
+        }
+        terminalController.onConversationReservationChange = { [weak self] height in
+            self?.webContainer?.setTerminalConversationReservation(height)
+        }
     }
 
     func installMainWindow() {
@@ -156,6 +170,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         window.isOpaque = true
         window.contentView = chrome
         chrome.install(hostingView: content, safeAreaLayoutGuide: chrome.safeAreaLayoutGuide)
+        installTerminalTitlebarControl(in: window)
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("DSHDesktopMainWindow")
@@ -164,13 +179,16 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         self.window = window
         self.windowChrome = chrome
+        updateTerminalTitlebarControl()
         restoreMainWindow()
     }
 
     func beginStartup() {
         startupTask?.cancel()
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         notificationOverlayHandle = nil
+        terminalOverlayHandle = nil
         operationGeneration &+= 1
         let generation = operationGeneration
         presentation = .checking
@@ -288,6 +306,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         operationGeneration &+= 1
         let updateGeneration = operationGeneration
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         clearReadinessDeadline(for: handle)
         terminationGate = .cleanupPending
         presentation = .preparingDependencyUpdate
@@ -352,6 +371,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         monitorTask?.cancel()
         operationGeneration &+= 1
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         webContainer = nil
         terminationGate = .clear
         presentation = .updatingDependency
@@ -362,6 +382,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         terminationGate = .clear
         notificationOverlayHandle = nil
         skipNotificationPluginForNextSpawn = false
+        terminalOverlayHandle = nil
+        skipTerminalPluginForNextSpawn = false
         reconciledExitedHandle = nil
         reachableServiceAfterExitHandle = nil
         lastObservedExit = nil
@@ -390,6 +412,22 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         guard let window else { return }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    var canToggleTerminalPanel: Bool {
+        terminalController.canToggleFromMenu
+    }
+
+    var isTerminalPanelVisible: Bool {
+        terminalController.isPanelVisible
+    }
+
+    func toggleTerminalPanel() {
+        terminalController.toggleFromMenu()
+    }
+
+    @objc private func toggleTerminalPanelFromTitlebar(_ sender: Any?) {
+        toggleTerminalPanel()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -477,11 +515,16 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             baseEnvironment: baseEnvironment,
             homeDirectory: homeDirectory
         )
+        let terminalPatchURL = prepareTerminalPlugin(
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory
+        )
         let spec = LaunchEnvironment.makeSpec(
             executable: executable,
             baseEnvironment: baseEnvironment,
             homeDirectory: homeDirectory,
-            notificationPatchURL: notificationPatchURL
+            notificationPatchURL: notificationPatchURL,
+            terminalPatchURL: terminalPatchURL
         )
         // 此门控必须早于任何 pipe、attr 或 posix_spawn 资源准备。
         terminationGate = .spawnTransaction
@@ -497,6 +540,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             }
             currentHandle = handle
             notificationOverlayHandle = notificationPatchURL == nil ? nil : handle
+            terminalOverlayHandle = terminalPatchURL == nil ? nil : handle
             reconciledExitedHandle = nil
             reachableServiceAfterExitHandle = nil
             lastObservedExit = nil
@@ -518,7 +562,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         } catch {
             terminationGate = .clear
             notificationOverlayHandle = nil
+            terminalOverlayHandle = nil
             setNotificationBridgeEnabled(false)
+            setTerminalBridgeEnabled(false)
             presentation = .launchFailed(describe(error))
             await continueDeferredTerminationAfterSpawnIfNeeded()
         }
@@ -599,6 +645,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         ownershipLossReconciledHandle = handle
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         terminationGate = .cleanupPending
         clearReadinessDeadline(for: handle)
         let result = await probe.probe()
@@ -614,16 +661,22 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func showWebContainer(reloadExisting: Bool = false) {
         if let webContainer {
             webContainer.setNotificationBridgeEnabled(notificationBridgeEnabled)
+            webContainer.setTerminalBridgeEnabled(terminalBridgeEnabled)
             if reloadExisting {
                 webContainer.loadLocalService()
             }
             presentation = .ready
             return
         }
-        let container = WebContainer(notificationCoordinator: notificationCoordinator)
+        let container = WebContainer(
+            notificationCoordinator: notificationCoordinator,
+            terminalController: terminalController
+        )
         container.setNotificationBridgeEnabled(notificationBridgeEnabled)
+        container.setTerminalBridgeEnabled(terminalBridgeEnabled)
         container.onChromeStyleChange = { [weak self] style in
             self?.windowChrome?.apply(style: style)
+            self?.terminalController.setSidebarWidth(style?.sidebarWidth)
         }
         webContainer = container
         container.loadLocalService()
@@ -701,6 +754,14 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         case .verified:
             terminationGate = .stoppable
             clearReadinessDeadline(for: handle)
+            // `terminalOverlayHandle` 精确绑定到本次直接子进程。只有它仍是当前已验证
+            // listener 的 owner，才让 WebKit 页面得到终端 capability。
+            setTerminalBridgeEnabled(
+                DesktopTerminalBridgePolicy.mayEnable(
+                    serviceOwnership: .owned,
+                    terminalPatchPrepared: terminalOverlayHandle == handle
+                )
+            )
             switch result {
             case .dshLikely, .reachableUnknown:
                 // 当前会话直接创建且 listener 已证明归属时，manifest 只保留兼容提示作用。
@@ -716,11 +777,13 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             // 但绝不把该网页服务或其监听者认定为 owned。
             terminationGate = .stoppable
             setNotificationBridgeEnabled(false)
+            setTerminalBridgeEnabled(false)
             clearReadinessDeadline(for: handle)
             presentation = .portConflict
 
         case .ownershipLost:
             setNotificationBridgeEnabled(false)
+            setTerminalBridgeEnabled(false)
             terminationGate = .cleanupPending
             clearReadinessDeadline(for: handle)
             await presentExternalServiceAfterOwnershipLoss(result)
@@ -735,6 +798,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     /// 身份或监听复核失败后，端口页面一律按 external 重新处理。
     private func presentExternalServiceAfterOwnershipLoss(_ result: ProbeResult) async {
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         switch result {
         case .dshLikely:
             showWebContainer(reloadExisting: true)
@@ -767,6 +831,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         guard currentHandle == handle else { return }
         // 主 PID 已退出或已无法可靠确认；端口上即使仍有页面，也只能按 external 处理。
         setNotificationBridgeEnabled(false)
+        setTerminalBridgeEnabled(false)
         if let exitStatus {
             lastObservedExit = (handle: handle, status: exitStatus)
         }
@@ -934,16 +999,105 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         webContainer?.setNotificationBridgeEnabled(enabled)
     }
 
+    /// 终端插件的 resolver 与提醒插件完全独立。准备成功只代表本次启动可以带上
+    /// `--patch`；真正向页面开启 bridge 要等 listener ownership 复核通过。
+    private func prepareTerminalPlugin(
+        baseEnvironment: [String: String],
+        homeDirectory: URL
+    ) -> URL? {
+        if skipTerminalPluginForNextSpawn {
+            skipTerminalPluginForNextSpawn = false
+            setTerminalBridgeEnabled(false)
+            return nil
+        }
+        guard let resourceRoot = Bundle.main.resourceURL,
+              let plugin = DSHTerminalPlugin(
+                directory: resourceRoot.appendingPathComponent(
+                    DSHTerminalPlugin.resourcesDirectoryName,
+                    isDirectory: true
+                )
+              ) else {
+            setTerminalBridgeEnabled(false)
+            return nil
+        }
+
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: baseEnvironment,
+                workingDirectory: homeDirectory,
+                homeDirectory: homeDirectory
+            )
+            return plugin.patchURL
+        } catch {
+            setTerminalBridgeEnabled(false)
+            return nil
+        }
+    }
+
+    private func setTerminalBridgeEnabled(_ enabled: Bool) {
+        terminalBridgeEnabled = enabled
+        webContainer?.setTerminalBridgeEnabled(enabled)
+        terminalController.setBridgeEnabled(enabled)
+        updateTerminalTitlebarControl()
+    }
+
+    /// 终端按钮属于 AppKit 壳层，而不是 DSH 页面。它沿用原生标题栏右侧 accessory
+    /// 布局，因此不会随 DSH header 重绘、主题或插件插槽变化而移动。
+    private func installTerminalTitlebarControl(in window: NSWindow) {
+        let label = "显示/隐藏底部终端 ⌘J"
+        let button = NSButton(frame: NSRect(x: 4, y: 2, width: 28, height: 24))
+        button.setButtonType(.toggle)
+        button.bezelStyle = .toolbar
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.image = NSImage(
+            systemSymbolName: "terminal",
+            accessibilityDescription: label
+        )?.withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        button.target = self
+        button.action = #selector(toggleTerminalPanelFromTitlebar(_:))
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+
+        // `.right` accessory 的容器仍贴着标题栏右缘；保留约 20pt 的右侧留白，使
+        // 图标落在窗口圆角内侧而非贴边，同时不影响原生点击区域或快捷键。
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 52, height: 28))
+        holder.addSubview(button)
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.layoutAttribute = .right
+        accessory.view = holder
+        window.addTitlebarAccessoryViewController(accessory)
+        terminalTitlebarAccessory = accessory
+        terminalTitlebarButton = button
+    }
+
+    private func updateTerminalTitlebarControl() {
+        guard let button = terminalTitlebarButton else { return }
+        let enabled = terminalController.canToggleFromMenu
+        let isOpen = terminalController.isPanelVisible
+        button.isEnabled = enabled
+        button.state = isOpen ? .on : .off
+        button.contentTintColor = isOpen ? .controlAccentColor : .secondaryLabelColor
+        button.toolTip = enabled
+            ? "显示/隐藏底部终端 ⌘J"
+            : "当前会话没有有效工作区，暂时无法打开底部终端"
+        button.setAccessibilityValue(isOpen ? "已显示" : "已隐藏")
+    }
+
     /// 覆盖层只要让 DSH 在页面就绪前失败一次，就退回标准启动命令。此路径没有
     /// 轮询或守护进程：它复用原有的退出收敛后启动流程，而且每次失败只尝试一次。
     private func retryWithoutNotificationPluginIfNeeded(handle: SpawnHandle) -> Bool {
-        guard notificationOverlayHandle == handle,
+        guard notificationOverlayHandle == handle || terminalOverlayHandle == handle,
               webContainer == nil,
               !quitPending else {
             return false
         }
         notificationOverlayHandle = nil
+        terminalOverlayHandle = nil
         skipNotificationPluginForNextSpawn = true
+        skipTerminalPluginForNextSpawn = true
+        setTerminalBridgeEnabled(false)
         beginStartup()
         return true
     }
@@ -1065,10 +1219,17 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         guard let confirmation = takePresentedQuitConfirmation() else {
             return
         }
-        if let handle = confirmation.ownedHandle {
-            requestOwnedTermination(handle: handle, transactionID: confirmation.transactionID)
-        } else {
-            replyToTermination(allow: true, transactionID: confirmation.transactionID)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // DSH 可能是 external，但 terminal 只可能由本 App 创建；退出授权前仍需
+            // 等待所有 PTY process group 完成清理。
+            await self.terminalController.closeAllAndWait()
+            guard self.isActiveTerminationTransaction(confirmation.transactionID) else { return }
+            if let handle = confirmation.ownedHandle {
+                self.requestOwnedTermination(handle: handle, transactionID: confirmation.transactionID)
+            } else {
+                self.replyToTermination(allow: true, transactionID: confirmation.transactionID)
+            }
         }
     }
 

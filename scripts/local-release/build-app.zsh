@@ -6,6 +6,7 @@ script_dir=${0:A:h}
 project_root=${script_dir:h:h}
 resources_dir="$project_root/Resources"
 notification_plugin_dir="$project_root/Plugins/dsd-pancake-notifications"
+terminal_plugin_dir="$project_root/Plugins/dsd-pancake-terminal"
 output_dir="${DSHD_OUTPUT_DIR:-$project_root/local-release}"
 app_path="$output_dir/DSD Pancake.app"
 archive_path="$output_dir/DSD Pancake.app.zip"
@@ -31,6 +32,10 @@ for required_path in \
     "$notification_plugin_dir/cordis.patch.yml" \
     "$notification_plugin_dir/lib/index.js" \
     "$notification_plugin_dir/lib/client.js" \
+    "$terminal_plugin_dir/package.json" \
+    "$terminal_plugin_dir/cordis.patch.yml" \
+    "$terminal_plugin_dir/lib/index.js" \
+    "$terminal_plugin_dir/lib/client.js" \
     /usr/bin/swift \
     /usr/bin/sips \
     /usr/bin/iconutil \
@@ -48,19 +53,37 @@ mkdir -p "$output_dir"
 /usr/bin/swift build -c release --product DSHDesktop --package-path "$project_root"
 bin_path=$(/usr/bin/swift build -c release --show-bin-path --package-path "$project_root")
 executable_path="$bin_path/DSHDesktop"
+swifterm_bundle_path="$bin_path/SwiftTerm_SwiftTerm.bundle"
 
 if [[ ! -x "$executable_path" ]]; then
     print -u2 "未找到 Release 可执行文件：$executable_path"
     exit 1
 fi
 
-mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources/DSHNotifications/lib"
+if [[ ! -d "$swifterm_bundle_path" || ! -f "$swifterm_bundle_path/Shaders.metal" ]]; then
+    print -u2 "未找到 SwiftTerm 的已构建 Metal 资源：$swifterm_bundle_path"
+    exit 1
+fi
+
+mkdir -p \
+    "$app_path/Contents/MacOS" \
+    "$app_path/Contents/Resources/DSHNotifications/lib" \
+    "$app_path/Contents/Resources/DSHTerminal/lib" \
+    "$app_path/Contents/Resources"
 /usr/bin/ditto "$executable_path" "$app_path/Contents/MacOS/DSHDesktop"
 /usr/bin/ditto "$resources_dir/Info.plist" "$app_path/Contents/Info.plist"
 /usr/bin/ditto "$notification_plugin_dir/package.json" "$app_path/Contents/Resources/DSHNotifications/package.json"
 /usr/bin/ditto "$notification_plugin_dir/cordis.patch.yml" "$app_path/Contents/Resources/DSHNotifications/cordis.patch.yml"
 /usr/bin/ditto "$notification_plugin_dir/lib/index.js" "$app_path/Contents/Resources/DSHNotifications/lib/index.js"
 /usr/bin/ditto "$notification_plugin_dir/lib/client.js" "$app_path/Contents/Resources/DSHNotifications/lib/client.js"
+/usr/bin/ditto "$terminal_plugin_dir/package.json" "$app_path/Contents/Resources/DSHTerminal/package.json"
+/usr/bin/ditto "$terminal_plugin_dir/cordis.patch.yml" "$app_path/Contents/Resources/DSHTerminal/cordis.patch.yml"
+/usr/bin/ditto "$terminal_plugin_dir/lib/index.js" "$app_path/Contents/Resources/DSHTerminal/lib/index.js"
+/usr/bin/ditto "$terminal_plugin_dir/lib/client.js" "$app_path/Contents/Resources/DSHTerminal/lib/client.js"
+# SwiftTerm 1.20.0 的 Metal renderer 会从 `Bundle.main.resourceURL` 查找这个 bundle，
+# 因此按 macOS 标准放进 Contents/Resources；不要把资源放在 .app 根目录，否则签名会
+# 变成 unsealed contents（未封装内容）。
+/usr/bin/ditto "$swifterm_bundle_path" "$app_path/Contents/Resources/SwiftTerm_SwiftTerm.bundle"
 
 # `PancakeAppIcon` 是 bundle 主图标，供 Finder 和原生通知的 App 身份使用。
 # 它刻意不复用历史的 `AppIcon` 资源键，以便 macOS 在替换本地 App 后重新解析

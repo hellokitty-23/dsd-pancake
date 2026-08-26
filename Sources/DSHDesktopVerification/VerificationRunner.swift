@@ -1,7 +1,9 @@
 import Darwin
+import Dispatch
 import Foundation
 import DSHDesktopCore
 import WebKit
+@preconcurrency import SwiftTerm
 
 @main
 struct DSHDesktopVerification {
@@ -45,6 +47,14 @@ struct DSHDesktopVerification {
 
         await run("App 私有提醒插件与桥协议") {
             try verifyNotificationPluginAndBridgeProtocol()
+        } failures: { failures.append($0) }
+
+        await run("App 私有终端插件、bridge 与底部布局") {
+            try verifyTerminalPluginBridgeAndDockLayout()
+        } failures: { failures.append($0) }
+
+        await run("真实 PTY 与工作区终端进程组清理") {
+            try await verifyPTYProcessGroupCleanup()
         } failures: { failures.append($0) }
 
         await run("SIGCHLD 与单实例锁") {
@@ -237,6 +247,25 @@ struct DSHDesktopVerification {
                 "--port", "3080",
             ],
             "带提醒覆盖层时没有使用 DSH launcher 的 --profile/--patch 参数"
+        )
+        let terminalPatchURL = URL(fileURLWithPath: "/tmp/dsd-pancake-terminal.yml")
+        let doublyPatchedSpec = LaunchEnvironment.makeSpec(
+            executable: executable,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": "/tmp/dshd-home"],
+            homeDirectory: URL(fileURLWithPath: "/tmp/dshd-home", isDirectory: true),
+            notificationPatchURL: patchURL,
+            terminalPatchURL: terminalPatchURL
+        )
+        try expect(
+            doublyPatchedSpec.arguments == [
+                "--profile", "web",
+                "--patch", patchURL.path,
+                "--patch", terminalPatchURL.path,
+                "--no-open",
+                "--host", "127.0.0.1",
+                "--port", "3080",
+            ],
+            "两个 App 私有插件没有以独立 launcher --patch 顺序启动"
         )
         try expect(
             DSHLocator().locate(lastChosenPath: echoURL.path)?.url == echoURL,
@@ -613,6 +642,33 @@ struct DSHDesktopVerification {
             "未知 resolver 符号链接被修改"
         )
 
+        let sameNameHome = root.appendingPathComponent("same-name-link-home", isDirectory: true)
+        let sameNameTarget = root.appendingPathComponent("same-name-plugin", isDirectory: true)
+        try fileManager.createDirectory(at: sameNameTarget, withIntermediateDirectories: true)
+        try Data("{\"name\":\"@dsd-pancake/dsh-desktop-notifications\"}".utf8)
+            .write(to: sameNameTarget.appendingPathComponent("package.json"))
+        let sameNameLink = sameNameHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
+        try fileManager.createDirectory(at: sameNameLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: sameNameLink.path, withDestinationPath: sameNameTarget.path)
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: ["DSH_HOME": sameNameHome.path],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory,
+                fileManager: fileManager
+            )
+            throw VerificationError("现存同名 resolver 符号链接被错误覆盖")
+        } catch let error as DSHNotificationPluginError {
+            guard case .resolverPathOccupied = error else {
+                throw VerificationError("现存同名 resolver 符号链接返回了错误类型：\(error)")
+            }
+        }
+        try expect(
+            try fileManager.destinationOfSymbolicLink(atPath: sameNameLink.path) == sameNameTarget.path,
+            "现存同名 resolver 符号链接被修改"
+        )
+
         let staleHome = root.appendingPathComponent("stale-link-home", isDirectory: true)
         let staleLink = staleHome
             .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
@@ -631,6 +687,367 @@ struct DSHDesktopVerification {
             try fileManager.destinationOfSymbolicLink(atPath: staleLink.path) == pluginDirectory.path,
             "移动 App 后的失效 resolver 链接未被修复"
         )
+    }
+
+    private static func verifyTerminalPluginBridgeAndDockLayout() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("dsd-pancake-terminal-plugin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let workspaceURL = root.appendingPathComponent("workspace", isDirectory: true)
+        try fileManager.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+
+        guard let request = DesktopTerminalWorkspaceRequest(
+            sessionID: "session-42",
+            workspacePath: workspaceURL.path
+        ), let workspace = DesktopTerminalWorkspace(request: request, fileManager: fileManager) else {
+            throw VerificationError("有效终端 workspace 请求未通过本机目录校验")
+        }
+
+        let syncBody: [String: Any] = [
+            "version": NSNumber(value: DesktopTerminalBridge.protocolVersion),
+            "action": "syncWorkspace",
+            "sessionID": request.sessionID,
+            "workspacePath": request.workspacePath,
+        ]
+        try expect(
+            DesktopTerminalBridge.decode(syncBody) == .syncWorkspace(request),
+            "有效终端 workspace bridge 请求未被解析"
+        )
+        try expect(
+            DesktopTerminalBridge.decode([
+                "version": NSNumber(value: DesktopTerminalBridge.protocolVersion),
+                "action": "clearWorkspace",
+            ]) == .clearWorkspace,
+            "有效终端 workspace 清除请求未被解析"
+        )
+        try expect(
+            DesktopTerminalBridge.decode([
+                "version": NSNumber(value: true),
+                "action": "capabilities",
+            ]) == nil,
+            "Boolean 被错误接受为终端 bridge 协议版本"
+        )
+        try expect(
+            DesktopTerminalBridge.decode([
+                "version": NSNumber(value: DesktopTerminalBridge.protocolVersion),
+                "action": "syncWorkspace",
+                "sessionID": request.sessionID,
+                "workspacePath": request.workspacePath,
+                "command": "echo forbidden",
+            ]) == nil,
+            "包含 command 的终端 bridge 请求未被拒绝"
+        )
+        try expect(
+            DesktopTerminalBridge.decode([
+                "version": NSNumber(value: DesktopTerminalBridge.protocolVersion),
+                "action": "syncWorkspace",
+                "sessionID": request.sessionID,
+                "workspacePath": "relative/workspace",
+            ]) == nil,
+            "相对 workspace path 被终端 bridge 接受"
+        )
+        try expect(
+            DesktopTerminalBridge.decode([
+                "version": NSNumber(value: DesktopTerminalBridge.protocolVersion),
+                "action": "toggle",
+                "sessionID": request.sessionID,
+                "workspacePath": request.workspacePath,
+            ]) == nil,
+            "网页仍可通过 bridge 请求显示或隐藏原生终端"
+        )
+        try expect(
+            DesktopTerminalWorkspaceRequest(
+                sessionID: "session-42",
+                workspacePath: workspaceURL.path + "\nunsafe"
+            ) == nil,
+            "带控制字符的 workspace path 被终端 bridge 接受"
+        )
+
+        try expect(
+            DesktopTerminalBridgeAdmission.decode(
+                syncBody,
+                bridgeEnabled: false,
+                isMainFrame: true,
+                originScheme: LocalService.url.scheme ?? "",
+                originHost: LocalService.host,
+                originPort: LocalService.port
+            ) == nil,
+            "bridge 被禁用时仍接收终端操作"
+        )
+        try expect(
+            DesktopTerminalBridgeAdmission.decode(
+                syncBody,
+                bridgeEnabled: true,
+                isMainFrame: false,
+                originScheme: LocalService.url.scheme ?? "",
+                originHost: LocalService.host,
+                originPort: LocalService.port
+            ) == nil,
+            "非主 frame 的终端 bridge 消息被接收"
+        )
+        try expect(
+            DesktopTerminalBridgeAdmission.decode(
+                syncBody,
+                bridgeEnabled: true,
+                isMainFrame: true,
+                originScheme: "https",
+                originHost: "example.com",
+                originPort: 443
+            ) == nil,
+            "错误 origin 的终端 bridge 消息被接收"
+        )
+        try expect(
+            DesktopTerminalBridgeAdmission.decode(
+                syncBody,
+                bridgeEnabled: true,
+                isMainFrame: true,
+                originScheme: LocalService.url.scheme ?? "",
+                originHost: LocalService.host,
+                originPort: LocalService.port
+            ) == .syncWorkspace(request),
+            "已启用的本地主 frame 终端 bridge 消息未通过"
+        )
+        try expect(
+            DesktopTerminalWorkspace(
+                request: DesktopTerminalWorkspaceRequest(
+                    sessionID: "session-42",
+                    workspacePath: root.appendingPathComponent("missing", isDirectory: true).path
+                )!,
+                fileManager: fileManager
+            ) == nil,
+            "不存在的 workspace 允许启动终端"
+        )
+
+        let response = DesktopTerminalBridgeResponse.payload(supported: false, isOpen: false, workspaceAccepted: false)
+        try expect(
+            response["supported"] as? Bool == false
+                && response["open"] as? Bool == false
+                && response["workspacePath"] == nil,
+            "终端 bridge 禁用响应泄漏路径或状态错误"
+        )
+        try expect(
+            !DesktopTerminalBridgePolicy.mayEnable(serviceOwnership: .external, terminalPatchPrepared: true)
+                && !DesktopTerminalBridgePolicy.mayEnable(serviceOwnership: .owned, terminalPatchPrepared: false)
+                && DesktopTerminalBridgePolicy.mayEnable(serviceOwnership: .owned, terminalPatchPrepared: true),
+            "external DSH 或缺失私有 patch 仍能启用终端 bridge"
+        )
+
+        var state = WorkspaceTerminalState()
+        try expect(state.show(workspace: workspace) == .created, "首个 workspace 没有创建独立终端")
+        guard let firstTab = state.activeTab else {
+            throw VerificationError("首个 workspace 没有激活终端标签")
+        }
+        state.hide()
+        try expect(
+            !state.isPanelVisible && state.knownWorkspaces.contains(workspace) && state.tabs(for: workspace) == [firstTab],
+            "收起面板错误结束了 shell 身份"
+        )
+        try expect(state.show(workspace: workspace) == .reused, "同一 workspace 切换 session 时没有复用终端")
+        let secondTab = state.createTab(workspace: workspace)
+        try expect(
+            secondTab.id != firstTab.id
+                && secondTab.ordinal == 2
+                && state.tabs(for: workspace).count == 2
+                && state.activeTab == secondTab,
+            "新建终端标签没有创建独立 shell 身份"
+        )
+        try expect(
+            state.select(tabID: firstTab.id) == firstTab && state.activeTab == firstTab,
+            "同一 workspace 的终端标签不能切换"
+        )
+        try expect(
+            state.close(tabID: firstTab.id) == firstTab
+                && state.activeTab == secondTab
+                && state.isPanelVisible,
+            "关闭一个终端标签错误结束了同 workspace 的其它 shell"
+        )
+
+        let secondWorkspaceURL = root.appendingPathComponent("workspace-two", isDirectory: true)
+        try fileManager.createDirectory(at: secondWorkspaceURL, withIntermediateDirectories: true)
+        let secondRequest = DesktopTerminalWorkspaceRequest(
+            sessionID: "session-43",
+            workspacePath: secondWorkspaceURL.path
+        )!
+        let secondWorkspace = DesktopTerminalWorkspace(request: secondRequest, fileManager: fileManager)!
+        try expect(state.show(workspace: secondWorkspace) == .created, "不同 workspace 错误复用了第一个终端")
+        guard let secondWorkspaceTab = state.activeTab else {
+            throw VerificationError("第二个 workspace 没有创建终端标签")
+        }
+        try expect(state.knownWorkspaces.count == 2, "不同 workspace 没有隔离终端状态")
+        state.synchronize(workspace: workspace)
+        try expect(
+            !state.isPanelVisible && state.activeWorkspace == workspace && state.activeTab == secondTab,
+            "workspace 切换时旧终端仍显示在新会话"
+        )
+        try expect(
+            state.select(tabID: secondWorkspaceTab.id) == nil && state.activeTab == secondTab,
+            "其它 workspace 的终端标签能显示在当前会话"
+        )
+        state.clearActiveWorkspace()
+        try expect(
+            !state.isPanelVisible && state.activeWorkspace == nil && state.knownWorkspaces.count == 2,
+            "没有有效 workspace 时错误结束了已有 shell 或保留了旧会话身份"
+        )
+        state.synchronize(workspace: workspace)
+        try expect(state.closeActiveTab() == secondTab, "关闭当前终端标签未返回正确标签")
+        try expect(!state.knownWorkspaces.contains(workspace) && state.knownWorkspaces.contains(secondWorkspace), "关闭一个标签错误影响其它 workspace")
+        try expect(state.closeAll() == Set([secondWorkspace]), "关闭全部终端没有精确返回待清理 workspace")
+
+        let collapsed = TerminalDockLayout.collapsed(totalHeight: 700)
+        let expanded = TerminalDockLayout.expanded(totalHeight: 700, requestedPanelHeight: 280)
+        let oversized = TerminalDockLayout.expanded(totalHeight: 700, requestedPanelHeight: 9_999)
+        let undersized = TerminalDockLayout.expanded(totalHeight: 700, requestedPanelHeight: 1)
+        try expect(
+            collapsed.webHeight == 700 && collapsed.panelHeight == 0,
+            "收起状态没有让 WebView 占满原生内容区"
+        )
+        try expect(
+            expanded.panelHeight == 280 && expanded.webHeight == collapsed.webHeight,
+            "展开终端错误缩短了同时承载 DSH 侧栏的 WKWebView"
+        )
+        try expect(
+            collapsed.conversationReservedHeight == 0
+                && expanded.conversationReservedHeight == expanded.panelHeight + expanded.dividerHeight,
+            "终端 dock 没有为右侧对话流提供与原生面板一致的预留高度"
+        )
+        try expect(
+            oversized.panelHeight <= (700 - TerminalDockLayout.dividerHeight) * TerminalDockLayout.maximumFraction,
+            "终端面板突破窗口 50% 高度上限"
+        )
+        try expect(TerminalDockLayout.maximumFraction == 0.5, "终端高度上限必须固定为可用窗口高度的 50%")
+        try expect(
+            undersized.panelHeight >= TerminalDockLayout.minimumPanelHeight,
+            "常规窗口下终端面板未遵守 160px 最小高度"
+        )
+        let contentRegion = TerminalDockLayout.contentRegion(totalWidth: 1_280, sidebarWidth: 368)
+        try expect(
+            contentRegion.leading == 368 && contentRegion.width == 912,
+            "终端 dock 没有从 DSH 左侧工程栏右边开始"
+        )
+        let fallbackRegion = TerminalDockLayout.contentRegion(totalWidth: 500, sidebarWidth: nil)
+        try expect(
+            fallbackRegion.leading == 260 && fallbackRegion.width == TerminalDockLayout.minimumContentWidth,
+            "网页侧栏宽度尚未到达时的终端 dock 回退区域不安全"
+        )
+
+        let pluginDirectory = root.appendingPathComponent("plugin", isDirectory: true)
+        try fileManager.createDirectory(
+            at: pluginDirectory.appendingPathComponent("lib", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data("{\"name\":\"@dsd-pancake/dsh-desktop-terminal\"}".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("package.json"))
+        try Data("[]\n".utf8).write(to: pluginDirectory.appendingPathComponent("cordis.patch.yml"))
+        try Data("export function apply() {}\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/index.js"))
+        try Data("window.__ModuleLoader__.load({})\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/client.js"))
+
+        guard let plugin = DSHTerminalPlugin(directory: pluginDirectory, fileManager: fileManager) else {
+            throw VerificationError("完整的 App 私有终端插件未被识别")
+        }
+        let configuredHome = root.appendingPathComponent("dsh-home", isDirectory: true)
+        try plugin.prepareResolver(
+            baseEnvironment: ["DSH_HOME": configuredHome.path],
+            workingDirectory: workspaceURL,
+            homeDirectory: root.appendingPathComponent("home", isDirectory: true),
+            fileManager: fileManager
+        )
+        let resolverLink = configuredHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-terminal")
+        try expect(
+            URL(
+                fileURLWithPath: try fileManager.destinationOfSymbolicLink(atPath: resolverLink.path),
+                isDirectory: true
+            ).standardizedFileURL == pluginDirectory.standardizedFileURL,
+            "终端插件 resolver 链接未指向 App 私有插件"
+        )
+        try expect(plugin.patchURL.lastPathComponent == "cordis.patch.yml", "终端覆盖层路径不正确")
+    }
+
+    private static func verifyPTYProcessGroupCleanup() async throws {
+        let delegate = PTYFixtureDelegate()
+        let process = LocalProcess(
+            delegate: delegate,
+            dispatchQueue: DispatchQueue(label: "io.github.hellokitty-23.dsd-pancake.verify.pty")
+        )
+        defer { process.terminate() }
+
+        // `LocalProcess` / `forkpty` 是与 App 内 LocalProcessTerminalView 相同的 PTY
+        // 后端。后台 sleep 用来证明我们清理的是 shell 所在的完整 process group，而
+        // 不是只向直接 shell PID 发送一个普通信号。
+        process.startProcess(
+            executable: "/bin/sh",
+            args: ["-c", "sleep 30 & child=$!; printf '__DSD_PTY_CHILD__:%s\\n' \"$child\"; wait"],
+            environment: [
+                "PATH=/usr/bin:/bin",
+                "HOME=/tmp",
+                "TERM=xterm-256color",
+                "LANG=en_US.UTF-8",
+            ],
+            execName: "-sh",
+            currentDirectory: "/tmp"
+        )
+
+        let childPID = try await delegate.waitForChildPID(timeoutNanoseconds: 3_000_000_000)
+        let shellPID = process.shellPid
+        try expect(shellPID > 1, "真实 PTY 未返回 shell PID")
+        let shellGroup = getpgid(shellPID)
+        let childGroup = getpgid(childPID)
+        try expect(shellGroup > 1 && shellGroup == childGroup, "PTY shell 与子进程不在同一 process group")
+
+        try expect(TerminalProcessGroup.send(SIGTERM, to: shellGroup), "无法向 PTY process group 发送 SIGTERM")
+        // 当前测试进程有时继承了忽略 SIGTERM 的 disposition（信号处理状态）；这正是
+        // App 终端控制器必须有 SIGKILL 兜底的原因。先给正常退出窗口，再验证兜底能
+        // 清理仍存活的完整 group。
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        if Darwin.kill(childPID, 0) == 0 {
+            try expect(
+                TerminalProcessGroup.send(SIGKILL, to: shellGroup),
+                "PTY process group 未响应 SIGTERM 时无法执行 SIGKILL 兜底"
+            )
+        }
+        process.terminate()
+        try expect(
+            await waitForDirectChildToReap(shellPID, timeoutNanoseconds: 3_000_000_000),
+            "关闭终端后 shell 没有被 waitpid 回收"
+        )
+        try expect(
+            await waitForProcessToExit(childPID, timeoutNanoseconds: 3_000_000_000),
+            "关闭终端后 PTY 子进程仍然存活"
+        )
+    }
+
+    private static func waitForDirectChildToReap(_ processID: pid_t, timeoutNanoseconds: UInt64) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
+        while true {
+            switch TerminalProcessGroup.reapIfExited(processID) {
+            case .reaped, .noChild:
+                return true
+            case .running:
+                break
+            case .failed:
+                return false
+            }
+            if DispatchTime.now().uptimeNanoseconds >= deadline {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    private static func waitForProcessToExit(_ processID: pid_t, timeoutNanoseconds: UInt64) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
+        while true {
+            if Darwin.kill(processID, 0) != 0, errno == ESRCH {
+                return true
+            }
+            if DispatchTime.now().uptimeNanoseconds >= deadline {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     private static func verifySIGCHLDDispositionAndSingleInstanceLock() throws {
@@ -1701,6 +2118,47 @@ private final class IdentityCaptureSwitch: @unchecked Sendable {
         lock.withLock {
             shouldFail = true
         }
+    }
+}
+
+/// 真实 PTY fixture 的输出只在内存中短暂保存，且仅接受我们固定脚本输出的数字 PID。
+/// 它不执行任何来自网页或用户输入的命令。
+private final class PTYFixtureDelegate: NSObject, LocalProcessDelegate {
+    private let lock = NSLock()
+    private var output = ""
+    private var childPID: pid_t?
+
+    func processTerminated(_ source: LocalProcess, exitCode: Int32?) {}
+
+    func dataReceived(slice: ArraySlice<UInt8>) {
+        guard let text = String(bytes: slice, encoding: .utf8) else { return }
+        lock.withLock {
+            output.append(text)
+            guard childPID == nil,
+                  let range = output.range(of: "__DSD_PTY_CHILD__:") else {
+                return
+            }
+            let suffix = output[range.upperBound...]
+            let digits = suffix.prefix { $0.isNumber }
+            if let parsed = Int32(digits), parsed > 1 {
+                childPID = pid_t(parsed)
+            }
+        }
+    }
+
+    func getWindowSize() -> winsize {
+        winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
+    }
+
+    func waitForChildPID(timeoutNanoseconds: UInt64) async throws -> pid_t {
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if let childPID = lock.withLock({ childPID }) {
+                return childPID
+            }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        throw VerificationError("真实 PTY fixture 未在期限内报告子进程 PID")
     }
 }
 

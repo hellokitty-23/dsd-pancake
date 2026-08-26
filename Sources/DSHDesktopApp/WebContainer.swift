@@ -30,10 +30,14 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private let navigationPolicy = WebNavigationPolicy()
     private let userContentController: WKUserContentController
     private let notificationCoordinator: NotificationCoordinator
+    private let terminalController: DesktopTerminalController
     private var chromeStyleMessageHandler: ChromeStyleMessageHandler?
     private var notificationMessageHandler: NotificationMessageHandler?
+    private var terminalMessageHandler: TerminalMessageHandler?
     private var navigationMessageDismissalTask: Task<Void, Never>?
     private var notificationBridgeEnabled = false
+    private var terminalBridgeEnabled = false
+    private var terminalConversationReservation: CGFloat = 0
     private var chromeStyle: ChromeSurfaceStyle? {
         didSet {
             guard chromeStyle != oldValue else { return }
@@ -41,8 +45,12 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
     }
 
-    init(notificationCoordinator: NotificationCoordinator) {
+    init(
+        notificationCoordinator: NotificationCoordinator,
+        terminalController: DesktopTerminalController
+    ) {
         self.notificationCoordinator = notificationCoordinator
+        self.terminalController = terminalController
         let configuration = WKWebViewConfiguration()
         userContentController = WKUserContentController()
         configuration.userContentController = userContentController
@@ -64,6 +72,14 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             contentWorld: .page,
             name: DesktopNotificationBridge.messageName
         )
+
+        let terminalHandler = TerminalMessageHandler(container: self)
+        terminalMessageHandler = terminalHandler
+        userContentController.addScriptMessageHandler(
+            terminalHandler,
+            contentWorld: .page,
+            name: DesktopTerminalBridge.messageName
+        )
         userContentController.addUserScript(
             WKUserScript(
                 source: ChromeStyleBridge.script,
@@ -84,6 +100,34 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     /// 固定注册但默认拒绝，避免已存在的网页服务意外获得原生通知能力。
     func setNotificationBridgeEnabled(_ enabled: Bool) {
         notificationBridgeEnabled = enabled
+    }
+
+    /// 终端 bridge 只由 AppCoordinator 在“本次 App 创建的 DSH 已验证归属且私有 patch
+    /// 已准备”时开启。handler 虽已注册，但关闭状态不处理任何能力请求。
+    func setTerminalBridgeEnabled(_ enabled: Bool) {
+        guard terminalBridgeEnabled != enabled else { return }
+        terminalBridgeEnabled = enabled
+        if enabled {
+            publishTerminalConversationReservation()
+        } else {
+            setTerminalConversationReservation(0)
+        }
+    }
+
+    /// 原生 dock 的实际高度由 `TerminalDockContainer` 在每次展开、收起、窗口缩放或
+    /// 分隔线拖动后给出。它是单向、纯视觉状态：只允许 App 私有插件将右侧对话流
+    /// 顶起，不会增加网页到原生层的任何能力。
+    func setTerminalConversationReservation(_ height: CGFloat) {
+        let normalized: CGFloat
+        if terminalBridgeEnabled, height.isFinite, height > 0 {
+            // 防御 WebKit 的意外大数；正常值已在 TerminalDockLayout 中受窗口高度钳制。
+            normalized = min(height, 20_000)
+        } else {
+            normalized = 0
+        }
+        guard terminalConversationReservation != normalized else { return }
+        terminalConversationReservation = normalized
+        publishTerminalConversationReservation()
     }
 
     func loadLocalService() {
@@ -113,6 +157,7 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
         isPageLoading = false
+        publishTerminalConversationReservation()
     }
 
     func webView(
@@ -209,8 +254,51 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         return await notificationCoordinator.handle(action)
     }
 
+    fileprivate func receiveTerminalMessage(
+        _ body: Any,
+        frameInfo: WKFrameInfo
+    ) -> [String: Any]? {
+        guard let action = DesktopTerminalBridgeAdmission.decode(
+            body,
+            bridgeEnabled: terminalBridgeEnabled,
+            isMainFrame: frameInfo.isMainFrame,
+            originScheme: frameInfo.securityOrigin.protocol,
+            originHost: frameInfo.securityOrigin.host,
+            originPort: frameInfo.securityOrigin.port
+        ) else { return nil }
+        return terminalController.handle(action)
+    }
+
     private func resetChromeStyle() {
         chromeStyle = nil
+    }
+
+    /// 页面加载早于或晚于原生 dock 都是合法状态，所以同时保留最后值并在 didFinish
+    /// 重发。这里不扫描或改写 DSH DOM；客户端插件只读取这个版本化事件，并在正式
+    /// composer footer slot 中渲染一个不可交互的高度占位。
+    private func publishTerminalConversationReservation() {
+        let height = terminalBridgeEnabled ? terminalConversationReservation : 0
+        let heightLiteral = String(
+            format: "%.3f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            height
+        )
+        let openLiteral = height > 0 ? "true" : "false"
+        let script = """
+        (() => {
+          const detail = Object.freeze({
+            version: 1,
+            open: \(openLiteral),
+            reservedHeight: \(heightLiteral),
+          });
+          window.__dshDesktopTerminalDockLayout = detail;
+          window.dispatchEvent(new CustomEvent("dsd-pancake-terminal-layout", { detail }));
+        })();
+        """
+        webView.evaluateJavaScript(script) { _, _ in
+            // 在页面提交前或网页进程退出时，WebKit 可以拒绝这一次纯视觉推送；
+            // didFinish 会使用已保存的最新值重发，不需要记录网页错误或重试循环。
+        }
     }
 
     private func openInDefaultBrowser(_ url: URL) {
@@ -306,6 +394,31 @@ private final class NotificationMessageHandler: NSObject, WKScriptMessageHandler
             }
             replyHandler(await container.receiveNotificationMessage(message.body, frameInfo: message.frameInfo), nil)
         }
+    }
+}
+
+@MainActor
+private final class TerminalMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
+    weak var container: WebContainer?
+
+    init(container: WebContainer) {
+        self.container = container
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping @MainActor (Any?, String?) -> Void
+    ) {
+        guard message.name == DesktopTerminalBridge.messageName else {
+            replyHandler(nil, "Unexpected script message name")
+            return
+        }
+        guard let container else {
+            replyHandler(nil, "Terminal bridge is unavailable")
+            return
+        }
+        replyHandler(container.receiveTerminalMessage(message.body, frameInfo: message.frameInfo), nil)
     }
 }
 
