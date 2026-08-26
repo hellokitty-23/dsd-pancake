@@ -12,3 +12,5 @@ DSD Pancake 会启动用户明确安装的本机 `dsh`，并把本机网页放�
 仓库启用 GitHub Private Security Advisories（私密安全通报）后，请优先通过仓库的 **Security** 页面提交报告。若该入口尚未启用，只提交最小可复现描述，并要求维护者提供私下沟通渠道。
 
 本项目不处理 DSH、Node.js 或第三方插件自身的安全漏洞；这些问题应报告给相应上游项目。
+
+菜单中的 DeepSeek Harness 更新只面向来源已验证的全局 `@deepseek-ai/dsh` npm 安装。检查阶段只读取版本和 npm 全局目录；写入前必须由用户在原生弹窗明确确认。实现不经过 Shell（命令解释器），不拼接页面文本，不使用 `sudo` 或 `SIGKILL`，也不会停止 external（外部已有）服务。npm 包安装本身会执行上游包允许的 lifecycle scripts（生命周期脚本）；因此用户仍应只使用可信 registry（包注册表），并把 registry 劫持、包供应链异常或来源边界绕过作为安全问题报告。

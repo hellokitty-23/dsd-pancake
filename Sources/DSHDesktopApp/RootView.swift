@@ -103,6 +103,16 @@ struct RootView: View {
                         detail: "waitpid 返回错误 \(code)。本次 App 会话已永久禁止再次启动 DSH；不会猜测 PID 或发送信号。重新打开 App 后只会按 external 服务重新探测。",
                         retry: false
                     )
+                case .preparingDependencyUpdate:
+                    progressView(
+                        title: "正在安全停止本次 DSH",
+                        detail: "进程和日志完全收敛后才会更新 DeepSeek Harness。"
+                    )
+                case .updatingDependency:
+                    progressView(
+                        title: "正在更新 DeepSeek Harness",
+                        detail: "只修改已确认的全局 npm 安装，完成后会重新启动 DSH。"
+                    )
                 case .stopping:
                     progressView(title: "正在等待本次 DSH 退出", detail: "不会使用强制结束，也不会关闭日志读取端。")
                 case .stopTimedOut:

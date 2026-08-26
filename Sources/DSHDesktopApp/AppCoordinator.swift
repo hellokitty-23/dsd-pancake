@@ -13,6 +13,13 @@ struct QuitConfirmation: Equatable, Identifiable {
     var id: UInt64 { transactionID }
 }
 
+enum DSHUpdatePreparation: Equatable {
+    case ready
+    case externalServiceActive
+    case busy(String)
+    case stopTimedOut
+}
+
 @MainActor
 final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private struct ReadinessDeadline {
@@ -46,6 +53,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         case serviceStopped
         case drainingCleanup
         case terminalUnavailable(Int32)
+        case preparingDependencyUpdate
+        case updatingDependency
         case stopping
         case stopTimedOut
     }
@@ -106,6 +115,13 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private var skipNotificationPluginForNextSpawn = false
     /// 已处理过失权的 handle 不再重复 probe；停止权一旦撤销，绝不恢复。
     private var ownershipLossReconciledHandle: SpawnHandle?
+    /// 只有菜单中的显式更新确认可以进入此状态。它与 AppKit 退出事务互斥，
+    /// 并保证 npm 修改全局安装前，本 App 拥有的 DSH 已完成正常退出和日志排空。
+    private var dependencyUpdatePreparationActive = false
+
+    /// 原生提示只作为主窗口的 sheet（窗口附属弹窗）出现；调用方不应创建独立
+    /// modal panel（模态面板）或为了显示结果强制把 App 抢到前台。
+    var alertHostWindow: NSWindow? { window }
 
     init(
         bundleIdentifier: String,
@@ -209,6 +225,148 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self.preferences.selectedDSHPath = url.path
             self.beginStartup()
         }
+    }
+
+    /// 为用户已经确认的 DSH 更新准备安全窗口：只会停止仍可验证为本 App 直接
+    /// 创建的进程；external（外部已有）服务、失去归属的 PID 或仍在清理的进程
+    /// 都会拒绝更新，不会猜测、扫描或发送强制信号。
+    func prepareForDSHUpdate() async -> DSHUpdatePreparation {
+        guard !dependencyUpdatePreparationActive else {
+            return .busy("已有 DeepSeek Harness 更新正在进行。")
+        }
+        guard !quitPending, terminationTransactions.activeID == nil else {
+            return .busy("DSD Pancake 正在处理退出请求，请取消退出后重试。")
+        }
+        guard !terminationGate.waitsForSpawnResult else {
+            return .busy("DSH 正在创建进程，请等待启动结束后重试。")
+        }
+
+        guard let handle = currentHandle else {
+            return await prepareForDSHUpdateWithoutOwnedHandle()
+        }
+
+        let cleanupState = await supervisor.cleanupState(handle)
+        guard currentHandle == handle else {
+            return await prepareForDSHUpdateWithoutOwnedHandle()
+        }
+        switch cleanupState {
+        case .clear:
+            currentHandle = nil
+            terminationGate = .clear
+            return await prepareForDSHUpdateWithoutOwnedHandle()
+        case .awaitingReap:
+            break
+        case .supervisionOnly, .drainingPipes, .orphanDrainIncompatible:
+            return .busy("DSH 或它的日志仍在清理，完成前不会修改全局安装。")
+        case .terminalUnavailable:
+            return .busy("当前 App 会话无法可靠回收 DSH，重新打开 App 后再试。")
+        }
+
+        guard await supervisor.verifyOwnership(handle) == .verified,
+              currentHandle == handle else {
+            return .externalServiceActive
+        }
+
+        let terminationResult = await supervisor.requestTermination(handle)
+        guard currentHandle == handle else {
+            return await prepareForDSHUpdateWithoutOwnedHandle()
+        }
+        switch terminationResult {
+        case .signalSent, .alreadyExited:
+            break
+        case .ownershipLost, .staleHandle:
+            return .externalServiceActive
+        case .terminalUnavailable:
+            return .busy("当前 App 会话无法可靠回收 DSH，重新打开 App 后再试。")
+        case let .signalFailed(code):
+            return .busy("无法正常停止本次 DSH（kill 错误 \(code)），不会继续更新。")
+        }
+
+        dependencyUpdatePreparationActive = true
+        startupTask?.cancel()
+        monitorTask?.cancel()
+        operationGeneration &+= 1
+        let updateGeneration = operationGeneration
+        setNotificationBridgeEnabled(false)
+        clearReadinessDeadline(for: handle)
+        terminationGate = .cleanupPending
+        presentation = .preparingDependencyUpdate
+
+        let deadline = DispatchTime.now().uptimeNanoseconds &+ 15_000_000_000
+        while currentHandle == handle,
+              dependencyUpdatePreparationActive,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            _ = await supervisor.checkExit(handle)
+            if await supervisor.cleanupComplete() {
+                currentHandle = nil
+                resetRuntimeAfterOwnedDSHStoppedForUpdate()
+                let result = await probe.probe()
+                guard dependencyUpdatePreparationActive else {
+                    return .busy("DeepSeek Harness 更新准备已取消。")
+                }
+                switch result {
+                case .unavailable:
+                    webContainer = nil
+                    presentation = .updatingDependency
+                    return .ready
+                case .dshLikely, .reachableUnknown, .reachableNonHTML:
+                    dependencyUpdatePreparationActive = false
+                    terminationGate = .clear
+                    await presentExternalServiceAfterOwnershipLoss(result)
+                    return .externalServiceActive
+                }
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        dependencyUpdatePreparationActive = false
+        terminationGate = .cleanupPending
+        presentation = .drainingCleanup
+        if currentHandle == handle {
+            startMonitoring(handle: handle, generation: updateGeneration)
+        }
+        return .stopTimedOut
+    }
+
+    /// npm 更新无论成功或失败都重新走正常启动预检。若安装已经损坏，既有的
+    /// launchFailed 状态会显示真实错误；这里不会循环安装或退回未知版本。
+    func finishDSHUpdateAndRestart() {
+        guard dependencyUpdatePreparationActive else { return }
+        dependencyUpdatePreparationActive = false
+        beginStartup()
+    }
+
+    private func prepareForDSHUpdateWithoutOwnedHandle() async -> DSHUpdatePreparation {
+        let result = await probe.probe()
+        guard currentHandle == nil,
+              !terminationGate.waitsForSpawnResult,
+              !quitPending else {
+            return .busy("DSH 状态刚刚发生变化，请稍后重试。")
+        }
+        guard case .unavailable = result else {
+            return .externalServiceActive
+        }
+
+        dependencyUpdatePreparationActive = true
+        startupTask?.cancel()
+        monitorTask?.cancel()
+        operationGeneration &+= 1
+        setNotificationBridgeEnabled(false)
+        webContainer = nil
+        terminationGate = .clear
+        presentation = .updatingDependency
+        return .ready
+    }
+
+    private func resetRuntimeAfterOwnedDSHStoppedForUpdate() {
+        terminationGate = .clear
+        notificationOverlayHandle = nil
+        skipNotificationPluginForNextSpawn = false
+        reconciledExitedHandle = nil
+        reachableServiceAfterExitHandle = nil
+        lastObservedExit = nil
+        ownershipLossReconciledHandle = nil
+        readinessDeadline = nil
     }
 
     func acceptUnknownExistingService() {

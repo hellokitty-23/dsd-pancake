@@ -7,7 +7,7 @@
 - Swift Command Line Tools；
 - 用户自己管理的 DSH 与其运行所需的 Node.js。
 
-DSD Pancake 不会安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。
+DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 菜单可只读检查版本；只有用户在显示版本差异的主窗口附属弹窗中点击“更新”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
 
 当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒插件的兼容性需要分别判断：提醒集成不可用时基础 Web UI 仍可能正常工作；只有带提醒覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带提醒覆盖层的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍与提醒插件兼容。
 
@@ -66,7 +66,7 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 3. 将 `DSD Pancake.app` 拖到同一窗口内的 `Applications` 快捷入口；若 Finder（访达）询问，选择“替换”。
 4. 从“应用程序”启动 `DSD Pancake`。
 
-同一 bundle ID（App 身份）下的正常替换会保留壳自身的 WebKit 登录状态和窗口偏好。App 仍要求目标 Mac 已独立安装可运行的 `dsh`；复制这个 `.app` 不会复制、安装或升级 DSH、Node.js 或用户插件。它只携带一个随 App 使用的私有完成提醒插件。
+同一 bundle ID（App 身份）下的正常替换会保留壳自身的 WebKit 登录状态和窗口偏好。App 仍要求目标 Mac 已独立安装可运行的 `dsh`；复制这个 `.app` 不会复制、安装或升级 DSH、Node.js 或用户插件。它只携带一个随 App 使用的私有完成提醒插件。菜单中的显式 npm 更新是独立的用户确认操作，不属于 App 安装或替换流程。
 
 本地构建会在 App 组装完成后执行 `codesign --sign -`：这是 macOS 自带的 ad-hoc（无身份）签名，用于绑定最终 App 的身份并使通知权限能够可靠登记。它不需要 Xcode、Apple 开发者账号、证书或公证；自己在构建机器上使用不需要额外步骤。DMG 只封装这份 App 并提供拖拽入口，不改变其信任等级。若把 DMG 或 ZIP 发给其他人，macOS 仍可能显示开发者验证提示；正式对外分发仍应另行配置 Developer ID（开发者身份）签名、hardened runtime（强化运行时）与 Apple notarization（公证）。
 
@@ -78,6 +78,20 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 4. 关闭窗口只隐藏窗口；第一次 `⌘Q` 总会显示安全退出确认层。只有可验证为本次 App 创建的 DSH 才可能收到一次 `SIGTERM`。
 
 确认层会说明本次退出的范围：四秒内再次按 `⌘Q` 时，若 DSH 是本次 App 创建且归属仍有效，会先请求停止它再退出；若服务是 App 打开前已存在的 external（外部已有）服务，或当前没有 DSH，则只退出 App，不会停止服务。`Esc`、取消、背景点击或超时都会取消退出，不发送信号。
+
+## 检查和更新 DeepSeek Harness
+
+App 菜单中的 `检查 DeepSeek Harness 更新…` 先执行只读检查，不会因为打开菜单就修改 npm：
+
+- 当前版本来自当前实际选择的绝对路径执行 `dsh --version`；
+- 最新版本来自与该 DSH 同一安装前缀的 npm 查询 `@deepseek-ai/dsh` 的 `dist-tags.latest`；
+- App 会把解析后的 `dsh` 路径约束在该 npm 的全局 `@deepseek-ai/dsh` 包目录中。手动选择的未知安装、源码 checkout（检出目录）和临时 `npx` 运行不会通过该边界；
+- 有更新时，主窗口附属弹窗显示两个版本、npm 绝对路径和开发者预览兼容提示；它不会强制把后台 App 抢到前台。点击“取消”不产生写操作；点击“更新”才进入停止和安装流程；
+- 只有仍可验证归属的 owned（本应用拥有）DSH 会收到一次 `SIGTERM`。external（外部已有）服务不会被停止，也不会在其运行期间修改全局安装；
+- 进程与两路日志自然收敛后，App 不经过 Shell（命令解释器），以固定参数执行 `npm install --global @deepseek-ai/dsh@latest --no-audit --no-fund`，最长等待十分钟；
+- npm 成功后再次执行同一 `dsh --version`，确认安装版本不低于检查时的 `latest`，随后按正常启动流程重新探测并启动 DSH。
+
+更新不会使用 `sudo`、不会请求管理员权限、不会发送 `SIGKILL`，也不会改写 `$DSH_HOME`。若 npm 全局目录对当前用户不可写，弹窗会显示失败原因，并重新走正常 DSH 启动流程。
 
 ## 完成提醒
 

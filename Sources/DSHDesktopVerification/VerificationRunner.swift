@@ -35,6 +35,10 @@ struct DSHDesktopVerification {
             try verifyLocatorAndEnvironment()
         } failures: { failures.append($0) }
 
+        await run("DSH 更新检查基础设施") {
+            try await verifyDSHUpdateFoundation()
+        } failures: { failures.append($0) }
+
         await run("App 私有提醒插件与桥协议") {
             try verifyNotificationPluginAndBridgeProtocol()
         } failures: { failures.append($0) }
@@ -234,6 +238,98 @@ struct DSHDesktopVerification {
             DSHLocator().locate(lastChosenPath: echoURL.path)?.url == echoURL,
             "用户上次选择路径未优先于固定候选路径"
         )
+    }
+
+    private static func verifyDSHUpdateFoundation() async throws {
+        guard let rc2 = DSHSemanticVersion("0.1.1-rc.2"),
+              let rc10 = DSHSemanticVersion("0.1.1-rc.10"),
+              let stable = DSHSemanticVersion("0.1.1"),
+              let nextPatch = DSHSemanticVersion("0.1.2"),
+              let buildOne = DSHSemanticVersion("1.0.0+build.1"),
+              let buildTwo = DSHSemanticVersion("1.0.0+build.2") else {
+            throw VerificationError("合法 SemVer（语义版本）无法解析")
+        }
+        try expect(rc2 < rc10 && rc10 < stable && stable < nextPatch, "预发布版本比较顺序错误")
+        try expect(buildOne == buildTwo, "SemVer build metadata（构建元数据）错误影响版本优先级")
+        try expect(
+            DSHSemanticVersion.extract(from: "DeepSeek Harness dsh v0.1.1-rc.2\n") == rc2,
+            "无法从 dsh --version 输出提取版本"
+        )
+        try expect(
+            DSHSemanticVersion.extract(from: "DeepSeek Harness dsh 0.1.1oops\n") == nil,
+            "版本提取错误接受了尾随字符"
+        )
+        try expect(
+            DSHUpdateService.parseNPMViewLatestOutput(#""0.1.1-rc.2""#) == rc2,
+            "无法解析 npm latest 的 JSON 字符串输出"
+        )
+        try expect(
+            DSHUpdateService.parseNPMViewLatestOutput("[\n  \"0.1.1-rc.2\"\n]") == rc2,
+            "无法解析 npm 12 的单元素 JSON 数组输出"
+        )
+        try expect(
+            DSHUpdateService.parseNPMViewLatestOutput(#"["0.1.1-rc.2", "0.1.1"]"#) == nil,
+            "错误接受了含多个 latest 版本的歧义 JSON 数组"
+        )
+        try expect(DSHSemanticVersion("01.0.0") == nil, "接受了带前导零的非法 SemVer")
+
+        let dummyDSH = URL(fileURLWithPath: "/opt/example/lib/node_modules/@deepseek-ai/dsh/lib/bin.js")
+        let dummyNPM = URL(fileURLWithPath: "/opt/example/bin/npm")
+        let dummyRoot = URL(fileURLWithPath: "/opt/example/lib/node_modules", isDirectory: true)
+        try expect(
+            DSHUpdateCheck(
+                dshExecutable: dummyDSH,
+                npmExecutable: dummyNPM,
+                npmGlobalRoot: dummyRoot,
+                currentVersion: rc2,
+                latestVersion: rc10
+            ).disposition == .updateAvailable,
+            "旧版本没有判定为可更新"
+        )
+        try expect(
+            DSHUpdateCheck(
+                dshExecutable: dummyDSH,
+                npmExecutable: dummyNPM,
+                npmGlobalRoot: dummyRoot,
+                currentVersion: stable,
+                latestVersion: rc10
+            ).disposition == .newerThanLatest,
+            "较新版本错误触发降级"
+        )
+        try expect(
+            DSHUpdateService.path(
+                dummyDSH,
+                isInside: dummyRoot
+                    .appendingPathComponent("@deepseek-ai", isDirectory: true)
+                    .appendingPathComponent("dsh", isDirectory: true)
+            ),
+            "全局 npm 包内的 dsh 没有通过来源边界"
+        )
+        try expect(
+            !DSHUpdateService.path(
+                URL(fileURLWithPath: "/opt/example/lib/node_modules/@deepseek-ai/dsh-evil/lib/bin.js"),
+                isInside: dummyRoot
+                    .appendingPathComponent("@deepseek-ai", isDirectory: true)
+                    .appendingPathComponent("dsh", isDirectory: true)
+            ),
+            "相似路径前缀错误通过全局 npm 来源边界"
+        )
+        try expect(
+            DSHUpdateService.updateArguments == [
+                "install", "--global", "@deepseek-ai/dsh@latest", "--no-audit", "--no-fund",
+            ],
+            "更新命令不是固定的 @deepseek-ai/dsh@latest 参数数组"
+        )
+
+        let commandOutput = try await OneShotCommandRunner().run(
+            executable: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: ["0.1.1-rc.2\n"],
+            timeout: 5,
+            baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp"],
+            homeDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true)
+        )
+        try expect(commandOutput.succeeded, "受控单次命令执行失败")
+        try expect(commandOutput.stdout == "0.1.1-rc.2", "单次命令没有分离并保留 stdout")
     }
 
     private static func verifyNotificationPluginAndBridgeProtocol() throws {

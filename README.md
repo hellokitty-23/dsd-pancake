@@ -2,7 +2,7 @@
 
 DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载一个私有的完成提醒插件；手动运行的普通 DSH 不会加载它。
 
-本项目是独立的本地桌面壳，不是 DSH 的安装器、升级器或功能分支，也不代表 DSH 的官方发布。
+本项目是独立的本地桌面壳，不打包或分发 DSH，也不是 DSH 的功能分支或官方发布。它可以只读检查当前 DSH 与 npm `latest`（最新发行标签）；只有用户在主窗口附属的原生弹窗中明确确认后，才会更新已验证为 `@deepseek-ai/dsh` 的全局 npm 安装。
 
 ## 它做什么
 
@@ -10,6 +10,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 - 端口空闲时，调用用户当前安装的 DSH；可用时以该次进程专属的 `--patch` 覆盖层加载 App 私有提醒插件；
 - 不打开 Terminal.app，不打开默认浏览器；
 - 只会停止当前 App 会话亲自创建、并且仍能验证归属的 DSH 进程；
+- 可从 App 菜单检查 DeepSeek Harness 更新；更新前在主窗口附属弹窗中显示当前／最新版本并要求再次确认；
 - 将同源 DSH 页面留在 App 内，把用户点击的外部链接交给默认浏览器；
 - 提供标准 macOS 编辑快捷键、首次 `⌘Q` 退出确认，以及关闭窗口后继续保留当前网页会话的行为。
 
@@ -19,7 +20,8 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 
 ## 它明确不做什么
 
-- 不打包、安装、升级或降级 DSH、Node.js，也不改写用户 DSH profile（配置档）的 package、bundle（插件列表）或 patch（覆盖层）配置、数据库或账号数据；
+- 不打包 DSH 或 Node.js，不自动安装、升级或降级任何依赖，也不改写用户 DSH profile（配置档）的 package、bundle（插件列表）或 patch（覆盖层）配置、数据库或账号数据；
+- 不对手动选择的未知安装、源码 checkout（检出目录）、`npx` 临时运行或 external（外部已有）DSH 执行更新；只有当前可执行文件能解析到同一 npm 的全局 `@deepseek-ai/dsh` 包目录，且用户在弹窗中确认时，才运行固定参数的 npm 更新；
 - 不扫描、接管或停止已存在的本机服务；
 - 不提供通用终端、任意命令执行、多标签页或远程 DSH 管理；
 - 不收集遥测数据，也不将网页内容、Cookie 或会话数据写入项目日志。
@@ -35,6 +37,18 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒插件的兼容性是两件事：提醒集成不可用时基础 Web UI 仍可能正常工作；只有带提醒覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带提醒覆盖层的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍与提醒插件兼容。
 
 App 会依次检查上次手动选择的可执行文件、`/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。找不到时，界面会让用户手动选择现有的 `dsh` 可执行文件。
+
+## DeepSeek Harness 更新
+
+打开 macOS App 菜单中的 `检查 DeepSeek Harness 更新…`：
+
+1. App 用当前实际选择的 `dsh --version` 读取本机版本；
+2. 验证该可执行文件位于同一 npm 返回的全局 `@deepseek-ai/dsh` 包目录内；
+3. 用同一个 npm 只读查询 `dist-tags.latest`（最新发行标签）；
+4. 发现更新时显示当前版本、最新版本和 npm 路径；只有点击“更新”才继续；
+5. 若 DSH 是本次 App 创建且归属仍有效，先发送一次 `SIGTERM` 并等待进程和日志自然收敛，再执行固定参数数组 `npm install --global @deepseek-ai/dsh@latest --no-audit --no-fund`；完成后校验 `dsh --version` 并重新启动服务。
+
+若 `127.0.0.1:3080` 是 external（外部已有）服务、进程归属失效、安装来源不匹配、停止超时或 npm 需要当前用户没有的写入权限，App 会停止更新并显示原因。它不会使用 Shell（命令解释器）、`sudo`、`SIGKILL` 或任意用户输入拼接命令，也不会修改 `$DSH_HOME` 中的会话、凭据和 profile（配置档）。
 
 ## 构建、打包与安装
 
