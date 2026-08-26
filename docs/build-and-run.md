@@ -7,7 +7,7 @@
 - Swift Command Line Tools；
 - 用户自己管理的 DSH 与其运行所需的 Node.js。
 
-DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 菜单可只读检查版本；只有用户在显示版本差异的主窗口附属弹窗中点击“更新”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
+DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 菜单可统一检查 App 与 DSH；App 更新只显示 GitHub 下载地址，DSH 只有用户在显示版本差异的主窗口附属弹窗中点击“更新 DSH”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
 
 当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒插件的兼容性需要分别判断：提醒集成不可用时基础 Web UI 仍可能正常工作；只有带提醒覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带提醒覆盖层的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍与提醒插件兼容。
 
@@ -79,14 +79,23 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 
 确认层会说明本次退出的范围：四秒内再次按 `⌘Q` 时，若 DSH 是本次 App 创建且归属仍有效，会先请求停止它再退出；若服务是 App 打开前已存在的 external（外部已有）服务，或当前没有 DSH，则只退出 App，不会停止服务。`Esc`、取消、背景点击或超时都会取消退出，不发送信号。
 
-## 检查和更新 DeepSeek Harness
+## 检查可选更新
 
-App 菜单中的 `检查 DeepSeek Harness 更新…` 先执行只读检查，不会因为打开菜单就修改 npm：
+App 菜单中的 `检查更新…` 会同时发起两个彼此独立的只读检查，汇总结果后再由用户逐项选择；一项网络或环境错误不会掩盖另一项结果。
+
+### DSD Pancake
+
+- 当前版本与 build（构建号）来自 App 自身的 `Info.plist`；
+- 最新版本只向 `https://github.com/hellokitty-23/dsd-pancake/releases/latest` 发送 `HEAD`（仅响应头）请求，并读取最终重定向标签，不使用 GitHub REST API 的未登录速率额度。只接受固定项目路径中的稳定 SemVer（语义版本）标签，DMG 地址按同一标签和固定 arm64 发布命名生成；
+- 有新版本时，主窗口附属弹窗显示当前／最新版本和下载地址。用户可选择“打开发布页”或“稍后”；两者都不会让 App 自行下载、安装、替换或重启；
+- 用户自行从发布页下载 DMG，退出旧 App 后按上面的标准拖拽安装步骤完成替换。
+
+### DeepSeek Harness
 
 - 当前版本来自当前实际选择的绝对路径执行 `dsh --version`；
 - 最新版本来自与该 DSH 同一安装前缀的 npm 查询 `@deepseek-ai/dsh` 的 `dist-tags.latest`；
 - App 会把解析后的 `dsh` 路径约束在该 npm 的全局 `@deepseek-ai/dsh` 包目录中。手动选择的未知安装、源码 checkout（检出目录）和临时 `npx` 运行不会通过该边界；
-- 有更新时，主窗口附属弹窗显示两个版本、npm 绝对路径和开发者预览兼容提示；它不会强制把后台 App 抢到前台。点击“取消”不产生写操作；点击“更新”才进入停止和安装流程；
+- 有更新时，主窗口附属弹窗显示两个版本和 npm 绝对路径；它不会强制把后台 App 抢到前台。点击“稍后”不产生写操作；点击“更新 DSH”才进入停止和安装流程；
 - 只有仍可验证归属的 owned（本应用拥有）DSH 会收到一次 `SIGTERM`。external（外部已有）服务不会被停止，也不会在其运行期间修改全局安装；
 - 进程与两路日志自然收敛后，App 不经过 Shell（命令解释器），以固定参数执行 `npm install --global @deepseek-ai/dsh@latest --no-audit --no-fund`，最长等待十分钟；
 - npm 成功后再次执行同一 `dsh --version`，确认安装版本不低于检查时的 `latest`，随后按正常启动流程重新探测并启动 DSH。

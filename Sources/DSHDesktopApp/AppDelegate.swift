@@ -1,14 +1,75 @@
 import AppKit
 import DSHDesktopCore
 
+private enum AppCheckResult {
+    case available(AppUpdateCheck)
+    case current(AppUpdateCheck)
+    case failed(String)
+
+    var hasUpdate: Bool {
+        if case .available = self { return true }
+        return false
+    }
+
+    var summary: String {
+        switch self {
+        case let .available(check):
+            let address = check.downloadURL ?? check.releasePageURL
+            return "DSD Pancake：可选更新 \(check.currentVersion) → \(check.latestVersion)\n"
+                + "下载地址：\(address.absoluteString)"
+        case let .current(check):
+            switch check.disposition {
+            case .upToDate:
+                return "DSD Pancake：已是最新版本 \(check.currentVersion) (\(check.currentBuild))"
+            case .newerThanLatest:
+                return "DSD Pancake：当前版本 \(check.currentVersion) 高于 GitHub latest \(check.latestVersion)"
+            case .updateAvailable:
+                return "DSD Pancake：发现可选更新 \(check.latestVersion)"
+            }
+        case let .failed(message):
+            return "DSD Pancake：检查失败\n\(message)"
+        }
+    }
+}
+
+private enum DSHCheckResult {
+    case available(DSHUpdateCheck)
+    case current(DSHUpdateCheck)
+    case failed(String)
+
+    var hasUpdate: Bool {
+        if case .available = self { return true }
+        return false
+    }
+
+    var summary: String {
+        switch self {
+        case let .available(check):
+            return "DeepSeek Harness：可选更新 \(check.currentVersion) → \(check.latestVersion)"
+        case let .current(check):
+            switch check.disposition {
+            case .upToDate:
+                return "DeepSeek Harness：已是最新版本 \(check.currentVersion)"
+            case .newerThanLatest:
+                return "DeepSeek Harness：当前版本 \(check.currentVersion) 高于 npm latest \(check.latestVersion)"
+            case .updateAvailable:
+                return "DeepSeek Harness：发现可选更新 \(check.latestVersion)"
+            }
+        case let .failed(message):
+            return "DeepSeek Harness：检查失败\n\(message)"
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: AppCoordinator?
     private let preferences = UserPreferences()
+    private let appUpdateService = AppUpdateService()
     private let dshUpdateService = DSHUpdateService()
     private var completionNotificationModeMenuItems: [DesktopNotificationDeliveryMode: NSMenuItem] = [:]
-    private var checkDSHUpdatesMenuItem: NSMenuItem?
-    private var dshUpdateTask: Task<Void, Never>?
+    private var checkUpdatesMenuItem: NSMenuItem?
+    private var updateTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         installDockIcon()
@@ -17,17 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu(title: "DSD Pancake")
         let aboutItem = NSMenuItem(
             title: "关于 DSD Pancake",
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            action: #selector(showAboutPanel(_:)),
             keyEquivalent: ""
         )
-        aboutItem.target = NSApp
-        let checkDSHUpdatesItem = NSMenuItem(
-            title: "检查 DeepSeek Harness 更新…",
-            action: #selector(checkForDSHUpdates(_:)),
+        aboutItem.target = self
+        let checkUpdatesItem = NSMenuItem(
+            title: "检查更新…",
+            action: #selector(checkForUpdates(_:)),
             keyEquivalent: ""
         )
-        checkDSHUpdatesItem.target = self
-        checkDSHUpdatesMenuItem = checkDSHUpdatesItem
+        checkUpdatesItem.target = self
+        checkUpdatesMenuItem = checkUpdatesItem
         let completionNotificationsItem = NSMenuItem(
             title: "完成提醒",
             action: nil,
@@ -55,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         quitItem.target = self
         appMenu.addItem(aboutItem)
-        appMenu.addItem(checkDSHUpdatesItem)
+        appMenu.addItem(checkUpdatesItem)
         appMenu.addItem(.separator())
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
@@ -118,11 +179,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if dshUpdateTask != nil {
+        if updateTask != nil {
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "DeepSeek Harness 更新流程尚未结束"
-            alert.informativeText = "请等待检查或更新完成后再退出 DSD Pancake，避免中断 npm。"
+            alert.messageText = "更新流程尚未结束"
+            alert.informativeText = "请等待检查或可选更新完成后再退出 DSD Pancake，避免中断 npm。"
             alert.addButton(withTitle: "知道了")
             if let window = coordinator?.alertHostWindow, window.attachedSheet == nil {
                 alert.beginSheetModal(for: window)
@@ -142,114 +203,166 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(sender)
     }
 
-    @objc private func checkForDSHUpdates(_ sender: NSMenuItem) {
-        guard dshUpdateTask == nil else { return }
+    @objc private func checkForUpdates(_ sender: NSMenuItem) {
+        guard updateTask == nil else { return }
         sender.isEnabled = false
-        sender.title = "正在检查 DeepSeek Harness 更新…"
-        dshUpdateTask = Task { @MainActor [weak self] in
-            await self?.runDSHUpdateFlow()
+        sender.title = "正在检查更新…"
+        updateTask = Task { @MainActor [weak self] in
+            await self?.runUpdateFlow()
         }
     }
 
-    private func runDSHUpdateFlow() async {
+    private func runUpdateFlow() async {
         defer {
-            checkDSHUpdatesMenuItem?.title = "检查 DeepSeek Harness 更新…"
-            checkDSHUpdatesMenuItem?.isEnabled = true
-            dshUpdateTask = nil
+            checkUpdatesMenuItem?.title = "检查更新…"
+            checkUpdatesMenuItem?.isEnabled = true
+            updateTask = nil
         }
 
         guard let coordinator else {
             await presentUpdateAlert(
                 title: "DSD Pancake 尚未准备好",
-                message: "主窗口完成启动后再检查 DeepSeek Harness 更新。",
-                style: .warning
-            )
-            return
-        }
-        guard let executable = DSHLocator().locate(lastChosenPath: preferences.selectedDSHPath) else {
-            await presentUpdateAlert(
-                title: "未找到可执行的 dsh",
-                message: "请先安装 DSH，或在主窗口中选择当前已安装的 dsh 可执行文件。",
+                message: "主窗口完成启动后再检查更新。",
                 style: .warning
             )
             return
         }
 
+        async let appOutcome = checkAppUpdate()
+        async let dshOutcome = checkDSHUpdate()
+        let (appResult, dshResult) = await (appOutcome, dshOutcome)
+        let hasOptionalUpdate = appResult.hasUpdate || dshResult.hasUpdate
+        let summaryResponse = await presentUpdateAlert(
+            title: "更新检查完成",
+            message: appResult.summary + "\n\n" + dshResult.summary,
+            primaryButton: hasOptionalUpdate ? "选择更新" : "好",
+            secondaryButton: hasOptionalUpdate ? "稍后" : nil
+        )
+        guard hasOptionalUpdate, summaryResponse == .alertFirstButtonReturn else { return }
+
+        if case let .available(check) = dshResult {
+            await offerDSHUpdate(check, coordinator: coordinator)
+        }
+        if case let .available(check) = appResult {
+            await offerAppUpdate(check)
+        }
+    }
+
+    private func checkAppUpdate() async -> AppCheckResult {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "未知"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? "未知"
+        do {
+            let check = try await appUpdateService.check(currentVersion: version, currentBuild: build)
+            return check.disposition == .updateAvailable ? .available(check) : .current(check)
+        } catch is CancellationError {
+            return .failed("检查已取消。")
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    private func checkDSHUpdate() async -> DSHCheckResult {
+        guard let executable = DSHLocator().locate(lastChosenPath: preferences.selectedDSHPath) else {
+            return .failed("未找到可执行的 dsh；App 更新检查仍已独立完成。")
+        }
         do {
             let check = try await dshUpdateService.check(executable: executable)
-            switch check.disposition {
-            case .upToDate:
-                await presentUpdateAlert(
-                    title: "DeepSeek Harness 已是最新版本",
-                    message: "当前版本和 npm latest（最新发行标签）均为 \(check.currentVersion)。"
-                )
-            case .newerThanLatest:
-                await presentUpdateAlert(
-                    title: "当前版本比 npm latest 更新",
-                    message: "当前版本：\(check.currentVersion)\n"
-                        + "npm latest：\(check.latestVersion)\n\n"
-                        + "不会自动降级或覆盖当前安装。"
-                )
-            case .updateAvailable:
-                let response = await presentUpdateAlert(
-                    title: "发现 DeepSeek Harness 更新",
-                    message: "当前版本：\(check.currentVersion)\n"
-                        + "最新版本：\(check.latestVersion)\n\n"
-                        + "更新会正常停止由 DSD Pancake 创建的 DSH，然后执行：\n"
-                        + "可执行文件：\(check.npmExecutable.path)\n"
-                        + "参数：\(DSHUpdateService.updateArguments.joined(separator: " "))\n\n"
-                        + "DSH 仍处于开发者预览阶段，更新后 App 会重新启动并检查兼容性。",
-                    style: .warning,
-                    primaryButton: "更新",
-                    secondaryButton: "取消"
-                )
-                guard response == .alertFirstButtonReturn else { return }
+            return check.disposition == .updateAvailable ? .available(check) : .current(check)
+        } catch is CancellationError {
+            return .failed("检查已取消。")
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
 
-                switch await coordinator.prepareForDSHUpdate() {
-                case .ready:
-                    break
-                case .externalServiceActive:
-                    await presentUpdateAlert(
-                        title: "检测到外部 DSH 服务",
-                        message: "127.0.0.1:3080 上的服务不能确认由本次 App 创建。为避免修改正在运行的外部 DSH，请先自行停止该服务，再重新检查更新。",
-                        style: .warning
-                    )
-                    return
-                case let .busy(message):
-                    await presentUpdateAlert(title: "现在不能更新", message: message, style: .warning)
-                    return
-                case .stopTimedOut:
-                    await presentUpdateAlert(
-                        title: "等待 DSH 停止超时",
-                        message: "不会强制结束进程，也没有执行 npm 更新。请等待日志清理完成后重试。",
-                        style: .warning
-                    )
-                    return
-                }
+    private func offerAppUpdate(_ check: AppUpdateCheck) async {
+        let downloadAddress = check.downloadURL ?? check.releasePageURL
+        let response = await presentUpdateAlert(
+            title: "DSD Pancake 有新版本",
+            message: "当前版本：\(check.currentVersion) (\(check.currentBuild))\n"
+                + "最新版本：\(check.latestVersion)\n\n"
+                + "下载地址：\n\(downloadAddress.absoluteString)\n\n"
+                + "DSD Pancake 不会自动下载、安装、替换或重启 App。",
+            primaryButton: "打开发布页",
+            secondaryButton: "稍后"
+        )
+        if response == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(check.releasePageURL)
+        }
+    }
 
-                checkDSHUpdatesMenuItem?.title = "正在更新 DeepSeek Harness…"
-                do {
-                    let result = try await dshUpdateService.update(using: check)
-                    coordinator.finishDSHUpdateAndRestart()
-                    await presentUpdateAlert(
-                        title: "DeepSeek Harness 更新完成",
-                        message: "\(result.previousVersion) → \(result.installedVersion)\n\n"
-                            + "DSD Pancake 正在重新启动本次 DSH 服务。"
-                    )
-                } catch {
-                    coordinator.finishDSHUpdateAndRestart()
-                    throw error
-                }
-            }
+    private func offerDSHUpdate(_ check: DSHUpdateCheck, coordinator: AppCoordinator) async {
+        let response = await presentUpdateAlert(
+            title: "DeepSeek Harness 有新版本",
+            message: "当前版本：\(check.currentVersion)\n"
+                + "最新版本：\(check.latestVersion)\n\n"
+                + "更新会正常停止由 DSD Pancake 创建的 DSH，然后执行：\n"
+                + "可执行文件：\(check.npmExecutable.path)\n"
+                + "参数：\(DSHUpdateService.updateArguments.joined(separator: " "))\n\n"
+                + "只有点击“更新 DSH”才会修改 npm；选择“稍后”不产生写操作。",
+            style: .warning,
+            primaryButton: "更新 DSH",
+            secondaryButton: "稍后"
+        )
+        guard response == .alertFirstButtonReturn else { return }
+
+        switch await coordinator.prepareForDSHUpdate() {
+        case .ready:
+            break
+        case .externalServiceActive:
+            await presentUpdateAlert(
+                title: "检测到外部 DSH 服务",
+                message: "127.0.0.1:3080 上的服务不能确认由本次 App 创建。为避免修改正在运行的外部 DSH，请先自行停止该服务，再重新检查更新。",
+                style: .warning
+            )
+            return
+        case let .busy(message):
+            await presentUpdateAlert(title: "现在不能更新", message: message, style: .warning)
+            return
+        case .stopTimedOut:
+            await presentUpdateAlert(
+                title: "等待 DSH 停止超时",
+                message: "不会强制结束进程，也没有执行 npm 更新。请等待日志清理完成后重试。",
+                style: .warning
+            )
+            return
+        }
+
+        checkUpdatesMenuItem?.title = "正在更新 DeepSeek Harness…"
+        do {
+            let result = try await dshUpdateService.update(using: check)
+            coordinator.finishDSHUpdateAndRestart()
+            await presentUpdateAlert(
+                title: "DeepSeek Harness 更新完成",
+                message: "\(result.previousVersion) → \(result.installedVersion)\n\n"
+                    + "DSD Pancake 正在重新启动本次 DSH 服务。"
+            )
         } catch is CancellationError {
             coordinator.finishDSHUpdateAndRestart()
         } catch {
+            coordinator.finishDSHUpdateAndRestart()
             await presentUpdateAlert(
                 title: "无法更新 DeepSeek Harness",
                 message: error.localizedDescription,
                 style: .critical
             )
         }
+    }
+
+    @objc private func showAboutPanel(_ sender: Any?) {
+        let credits = NSMutableAttributedString(string: "GitHub 项目地址：\n")
+        credits.append(
+            NSAttributedString(
+                string: AppUpdateService.repositoryURL.absoluteString,
+                attributes: [
+                    .link: AppUpdateService.repositoryURL,
+                    .foregroundColor: NSColor.linkColor,
+                ]
+            )
+        )
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
     @discardableResult

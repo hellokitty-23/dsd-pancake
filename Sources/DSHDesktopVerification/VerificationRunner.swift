@@ -39,6 +39,10 @@ struct DSHDesktopVerification {
             try await verifyDSHUpdateFoundation()
         } failures: { failures.append($0) }
 
+        await run("App Release 只读检查基础设施") {
+            try verifyAppUpdateFoundation()
+        } failures: { failures.append($0) }
+
         await run("App 私有提醒插件与桥协议") {
             try verifyNotificationPluginAndBridgeProtocol()
         } failures: { failures.append($0) }
@@ -241,22 +245,22 @@ struct DSHDesktopVerification {
     }
 
     private static func verifyDSHUpdateFoundation() async throws {
-        guard let rc2 = DSHSemanticVersion("0.1.1-rc.2"),
-              let rc10 = DSHSemanticVersion("0.1.1-rc.10"),
-              let stable = DSHSemanticVersion("0.1.1"),
-              let nextPatch = DSHSemanticVersion("0.1.2"),
-              let buildOne = DSHSemanticVersion("1.0.0+build.1"),
-              let buildTwo = DSHSemanticVersion("1.0.0+build.2") else {
+        guard let rc2 = SemanticVersion("0.1.1-rc.2"),
+              let rc10 = SemanticVersion("0.1.1-rc.10"),
+              let stable = SemanticVersion("0.1.1"),
+              let nextPatch = SemanticVersion("0.1.2"),
+              let buildOne = SemanticVersion("1.0.0+build.1"),
+              let buildTwo = SemanticVersion("1.0.0+build.2") else {
             throw VerificationError("合法 SemVer（语义版本）无法解析")
         }
         try expect(rc2 < rc10 && rc10 < stable && stable < nextPatch, "预发布版本比较顺序错误")
         try expect(buildOne == buildTwo, "SemVer build metadata（构建元数据）错误影响版本优先级")
         try expect(
-            DSHSemanticVersion.extract(from: "DeepSeek Harness dsh v0.1.1-rc.2\n") == rc2,
+            SemanticVersion.extract(from: "DeepSeek Harness dsh v0.1.1-rc.2\n") == rc2,
             "无法从 dsh --version 输出提取版本"
         )
         try expect(
-            DSHSemanticVersion.extract(from: "DeepSeek Harness dsh 0.1.1oops\n") == nil,
+            SemanticVersion.extract(from: "DeepSeek Harness dsh 0.1.1oops\n") == nil,
             "版本提取错误接受了尾随字符"
         )
         try expect(
@@ -271,7 +275,7 @@ struct DSHDesktopVerification {
             DSHUpdateService.parseNPMViewLatestOutput(#"["0.1.1-rc.2", "0.1.1"]"#) == nil,
             "错误接受了含多个 latest 版本的歧义 JSON 数组"
         )
-        try expect(DSHSemanticVersion("01.0.0") == nil, "接受了带前导零的非法 SemVer")
+        try expect(SemanticVersion("01.0.0") == nil, "接受了带前导零的非法 SemVer")
 
         let dummyDSH = URL(fileURLWithPath: "/opt/example/lib/node_modules/@deepseek-ai/dsh/lib/bin.js")
         let dummyNPM = URL(fileURLWithPath: "/opt/example/bin/npm")
@@ -330,6 +334,69 @@ struct DSHDesktopVerification {
         )
         try expect(commandOutput.succeeded, "受控单次命令执行失败")
         try expect(commandOutput.stdout == "0.1.1-rc.2", "单次命令没有分离并保留 stdout")
+    }
+
+    private static func verifyAppUpdateFoundation() throws {
+        guard let currentVersion = SemanticVersion("0.0.1") else {
+            throw VerificationError("无法构造 App 当前版本 fixture")
+        }
+        let releaseURL = URL(
+            string: "https://github.com/hellokitty-23/dsd-pancake/releases/tag/v0.0.2"
+        )!
+        let check = try AppUpdateService.parseLatestReleaseURL(
+            releaseURL,
+            currentVersion: currentVersion,
+            currentBuild: "36"
+        )
+        try expect(check.disposition == .updateAvailable, "较新的 App Release 未判定为可选更新")
+        try expect(check.latestVersion == SemanticVersion("0.0.2"), "App Release tag 版本解析错误")
+        try expect(
+            check.releasePageURL.absoluteString
+                == "https://github.com/hellokitty-23/dsd-pancake/releases/tag/v0.0.2",
+            "App Release 页面地址解析错误"
+        )
+        try expect(
+            check.downloadURL?.absoluteString
+                == "https://github.com/hellokitty-23/dsd-pancake/releases/download/v0.0.2/DSD-Pancake-v0.0.2-arm64.dmg",
+            "App 更新检查没有生成受约束的 arm64 DMG 下载地址"
+        )
+
+        let sameVersion = AppUpdateCheck(
+            currentVersion: currentVersion,
+            currentBuild: "36",
+            latestVersion: currentVersion,
+            releasePageURL: check.releasePageURL,
+            downloadURL: check.downloadURL
+        )
+        try expect(sameVersion.disposition == .upToDate, "相同 App 版本未判定为最新")
+
+        do {
+            _ = try AppUpdateService.parseLatestReleaseURL(
+                URL(string: "https://example.com/hellokitty-23/dsd-pancake/releases/tag/v0.0.2")!,
+                currentVersion: currentVersion,
+                currentBuild: "36"
+            )
+            throw VerificationError("非 GitHub 项目地址错误通过 App 更新来源边界")
+        } catch let error as AppUpdateError {
+            guard case .untrustedReleaseURL = error else {
+                throw VerificationError("非 GitHub 项目地址返回了错误类型：\(error)")
+            }
+        }
+
+        do {
+            _ = try AppUpdateService.parseLatestReleaseURL(
+                URL(
+                    string: "https://github.com/hellokitty-23/dsd-pancake/releases/tag/v0.0.2-rc.1"
+                )!,
+                currentVersion: currentVersion,
+                currentBuild: "36"
+            )
+            throw VerificationError("预发布 App Release 错误进入正式更新通道")
+        } catch let error as AppUpdateError {
+            guard error == .unstableRelease else {
+                throw VerificationError("预发布 App Release 返回了错误类型：\(error)")
+            }
+        }
     }
 
     private static func verifyNotificationPluginAndBridgeProtocol() throws {
