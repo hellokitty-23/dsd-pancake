@@ -7,7 +7,7 @@
 - Swift Command Line Tools；
 - 用户自己管理的 DSH 与其运行所需的 Node.js。
 
-DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 菜单可统一检查 App 与 DSH；App 更新只显示 GitHub 下载地址，DSH 只有用户在显示版本差异的主窗口附属弹窗中点击“更新 DSH”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
+DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 每小时分别静默检查 App 与 DSH 的可选更新，并只保存最近检查时间与最小版本缓存；发现更新时仅在壳的原生标题栏显示图标。App 菜单可立即统一检查两者；DSH 只有用户在原生确认中点击“更新 DSH”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
 
 当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／终端插件的兼容性需要分别判断：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
 
@@ -33,7 +33,8 @@ zsh scripts/verify.zsh
 local-release/DSD Pancake.app
 local-release/DSD Pancake.app.zip
 local-release/DSD Pancake.build.plist
-local-release/DSD Pancake.dmg
+local-release/DSD-Pancake-v0.0.3-arm64.dmg
+local-release/DSD-Pancake-v0.0.3-arm64.dmg.sha256
 ```
 
 build plist（构建映射文件）的 `AppPath` 与 `ArchivePath` 只记录输出文件名，不记录构建机器的绝对路径；它仍是本地构建映射，不应作为运行时配置。
@@ -50,7 +51,7 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 ./scripts/local-release/build-app.zsh
 ./scripts/local-release/verify-app.zsh "local-release/DSD Pancake.app"
 ./scripts/local-release/build-dmg.zsh "local-release/DSD Pancake.app"
-./scripts/local-release/verify-dmg.zsh "local-release/DSD Pancake.dmg"
+./scripts/local-release/verify-dmg.zsh "local-release/DSD-Pancake-v0.0.3-arm64.dmg"
 ```
 
 打包校验会拒绝包含 DSH、Node.js、`node_modules`（依赖目录）、第三方插件、网页资源、测试夹具或额外可执行文件的 App bundle（应用包）。唯一允许的插件内容是 App 自带提醒和终端包各自的四个已构建文件：`package.json`、`cordis.patch.yml`、`lib/index.js` 和 `lib/client.js`；另外只允许 SwiftTerm `1.20.0` 所需、由 `Bundle.main.resourceURL` 从标准 `Contents/Resources` 读取的 `SwiftTerm_SwiftTerm.bundle/Shaders.metal`。SwiftTerm 为 MIT License，完整声明见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
@@ -62,7 +63,7 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 `DSD Pancake.app` 本身就是一个可移动的 macOS App bundle（应用包）。项目使用标准 DMG 拖拽安装，不使用会登记系统安装回执或可能要求管理员权限的 PKG（系统安装包）。
 
 1. 若已有 DSD Pancake 正在运行，先按一次 `⌘Q` 叫出确认层，再按一次 `⌘Q` 退出；不要覆盖正在运行的 `.app`。
-2. 双击打开 `local-release/DSD Pancake.dmg`。
+2. 双击打开与版本对应的 `local-release/DSD-Pancake-v<version>-arm64.dmg`。公开分发时必须一并提供同名 `.sha256` sidecar（校验文件）；可用 `shasum -a 256` 手动核对，或先让 App 的更新 Popover 校验下载文件。
 3. 将 `DSD Pancake.app` 拖到同一窗口内的 `Applications` 快捷入口；若 Finder（访达）询问，选择“替换”。
 4. 从“应用程序”启动 `DSD Pancake`。
 
@@ -81,14 +82,16 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 
 ## 检查可选更新
 
-App 菜单中的 `检查更新…` 会同时发起两个彼此独立的只读检查，汇总结果后再由用户逐项选择；一项网络或环境错误不会掩盖另一项结果。
+App 启动时及之后每隔约一小时会分别发起两个彼此独立的只读检查，并记录每一项最后一次尝试时间。它不弹窗、不下载、不安装；睡眠恢复后最多补一轮已到期检查。发现可选更新时，壳层标题栏左侧以强调色显示更新图标，点击后出现原生 Popover。菜单中的 `检查更新…` 会立即刷新并汇总两项结果；用户主动检查过后，即使当前没有可选更新，图标仍会在本次启动期间保留为中性入口，点击可查看结果或再次检查。一项网络或环境错误不会掩盖另一项结果。
 
 ### DSD Pancake
 
 - 当前版本与 build（构建号）来自 App 自身的 `Info.plist`；
-- 最新版本只向 `https://github.com/hellokitty-23/dsd-pancake/releases/latest` 发送 `HEAD`（仅响应头）请求，并读取最终重定向标签，不使用 GitHub REST API 的未登录速率额度。只接受固定项目路径中的稳定 SemVer（语义版本）标签，DMG 地址按同一标签和固定 arm64 发布命名生成；
-- 有新版本时，主窗口附属弹窗显示当前／最新版本和下载地址。用户可选择“打开发布页”或“稍后”；两者都不会让 App 自行下载、安装、替换或重启；
-- 用户自行从发布页下载 DMG，退出旧 App 后按上面的标准拖拽安装步骤完成替换。
+- 最新版本只向 `https://github.com/hellokitty-23/dsd-pancake/releases/latest` 发送 `HEAD`（仅响应头）请求，并读取最终重定向标签，不使用 GitHub REST API 的未登录速率额度。检查使用无 Cookie、无凭据缓存的临时 `URLSession`；只接受固定项目路径中的稳定 SemVer（语义版本）标签，DMG 地址按同一标签和固定 arm64 发布命名生成；
+- 有新版本时，原生 Popover 显示当前／最新版本，并先只读取同一 tag 下的 `.sha256` sidecar；只有 sidecar 严格有效时才显示“下载更新”，用户点击后才接受 GitHub 明确受控的 Release 资产跳转并下载到同目录 `.part` 临时文件；
+- App 对临时文件流式计算 SHA-256（安全散列算法），仅在 sidecar 的单行哈希和精确 DMG 文件名都匹配时，才原子移动到 Downloads（下载）目录。已有同名文件不会覆盖，会使用递增序号；
+- sidecar 缺失、超大、格式错误、跳转不可信或哈希不匹配时，App 不会保留该下载，界面只允许用户打开发布页；
+- 下载完成后，App 仍不会自动打开 DMG、挂载、安装、替换或重启。用户可点击“在 Finder 中显示”或“打开 DMG”，退出旧 App 后按上面的标准拖拽安装步骤完成替换。
 
 ### DeepSeek Harness
 

@@ -34,6 +34,8 @@ final class DesktopTerminalController: NSObject, ObservableObject {
     private weak var dock: TerminalDockContainer?
     private var bridgeEnabled = false
     private var sidebarWidth: CGFloat?
+    /// DSH 右侧对话主画布的只读颜色；`nil` 时回退到系统 terminal 背景色。
+    private var mainSurfaceColor: NSColor?
 
     /// AppCoordinator 负责将这份极小状态同步到当前 WebKit 页面。它不包含 cwd、终端
     /// 输入或输出，避免把本机信息回传给 DSH 页面。
@@ -49,6 +51,7 @@ final class DesktopTerminalController: NSObject, ObservableObject {
     func attach(dock: TerminalDockContainer) {
         self.dock = dock
         dock.setSidebarWidth(sidebarWidth)
+        dock.setMainSurfaceColor(mainSurfaceColor)
         dock.onPanelHeightChanged = { [weak self] height in
             self?.state.rememberPanelHeight(height)
         }
@@ -77,6 +80,16 @@ final class DesktopTerminalController: NSObject, ObservableObject {
         guard sidebarWidth != normalized else { return }
         sidebarWidth = normalized
         dock?.setSidebarWidth(normalized)
+    }
+
+    /// 复用网页已经同步给原生标题栏的主表面色，让 native terminal 的标签栏和 shell
+    /// 画布延续对话区域；网页只提供有限 RGBA 视觉值，不能影响终端行为或内容。
+    func setMainSurfaceColor(_ color: NSColor?) {
+        mainSurfaceColor = color
+        dock?.setMainSurfaceColor(color)
+        for session in sessions.values {
+            session.view.nativeBackgroundColor = terminalBackgroundColor
+        }
     }
 
     func detach(dock: TerminalDockContainer) {
@@ -238,6 +251,7 @@ final class DesktopTerminalController: NSObject, ObservableObject {
         let terminal = LocalProcessTerminalView(frame: .zero)
         terminal.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         terminal.configureNativeColors()
+        terminal.nativeBackgroundColor = terminalBackgroundColor
         let delegate = TerminalSessionDelegate(tabID: tab.id, controller: self)
         terminal.processDelegate = delegate
 
@@ -275,6 +289,10 @@ final class DesktopTerminalController: NSObject, ObservableObject {
             return configured
         }
         return FileManager.default.isExecutableFile(atPath: "/bin/zsh") ? "/bin/zsh" : "/bin/bash"
+    }
+
+    private var terminalBackgroundColor: NSColor {
+        mainSurfaceColor ?? .textBackgroundColor
     }
 
     /// SwiftTerm 的默认环境不会继承 PATH；只显式保留 shell 正常运行所需的低风险

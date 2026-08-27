@@ -5,13 +5,15 @@ set -euo pipefail
 script_dir=${0:A:h}
 
 if [[ $# -ne 1 ]]; then
-    print -u2 "用法：$0 '/绝对路径/DSD Pancake.dmg'"
+    print -u2 "用法：$0 '/绝对路径/DSD-Pancake-v版本-arm64.dmg'"
     exit 64
 fi
 
 dmg_path=${1:A}
+checksum_path="${dmg_path}.sha256"
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/dsd-pancake-dmg-verify.XXXXXX")"
 mount_point="$temporary_dir/mount"
+expected_checksum_path="$temporary_dir/expected.sha256"
 mounted=false
 
 cleanup() {
@@ -32,8 +34,12 @@ for required_path in \
     /bin/mkdir \
     /usr/bin/find \
     /usr/bin/hdiutil \
+    /usr/bin/cmp \
+    /usr/bin/printf \
     /usr/bin/readlink \
-    /usr/bin/shasum; do
+    /usr/bin/awk \
+    /usr/bin/shasum \
+    /usr/libexec/PlistBuddy; do
     if [[ ! -x "$required_path" && ! -f "$required_path" ]]; then
         print -u2 "缺少 DMG 验证所需文件或工具：$required_path"
         exit 1
@@ -42,6 +48,18 @@ done
 
 if [[ ! -f "$dmg_path" ]]; then
     print -u2 "未找到 DMG（磁盘映像）：$dmg_path"
+    exit 1
+fi
+
+if [[ ! -f "$checksum_path" || -L "$checksum_path" ]]; then
+    print -u2 "未找到普通文件形式的 SHA-256 校验文件：$checksum_path"
+    exit 1
+fi
+
+dmg_sha256=$(/usr/bin/shasum -a 256 "$dmg_path" | /usr/bin/awk '{print $1}')
+/usr/bin/printf '%s  %s\n' "$dmg_sha256" "${dmg_path:t}" > "$expected_checksum_path"
+if ! /usr/bin/cmp -s "$checksum_path" "$expected_checksum_path"; then
+    print -u2 "DMG 的 SHA-256 校验文件不匹配、格式不精确或文件名不正确：$checksum_path"
     exit 1
 fi
 
@@ -87,9 +105,15 @@ fi
 # 在只读挂载后的真实磁盘映像中再次检查 App，避免只验证 staging（暂存目录）。
 /bin/zsh "$script_dir/verify-app.zsh" "$mounted_app"
 
+mounted_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$mounted_app/Contents/Info.plist")
+expected_dmg_name="DSD-Pancake-v${mounted_version}-arm64.dmg"
+if [[ "${dmg_path:t}" != "$expected_dmg_name" ]]; then
+    print -u2 "DMG 文件名与 bundle 版本不匹配：期望 $expected_dmg_name，实际 ${dmg_path:t}"
+    exit 1
+fi
+
 /usr/bin/hdiutil detach -quiet "$mount_point"
 mounted=false
-dmg_sha256=$(/usr/bin/shasum -a 256 "$dmg_path" | /usr/bin/awk '{print $1}')
 
-print "PASS: DMG 校验和、只读挂载、App 签名与 Applications 快捷入口均有效"
+print "PASS: DMG SHA-256 sidecar、只读挂载、App 签名与 Applications 快捷入口均有效"
 print "PASS: DMG SHA-256 = $dmg_sha256"

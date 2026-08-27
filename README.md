@@ -2,16 +2,17 @@
 
 DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载独立的完成提醒和底部终端私有插件；手动运行的普通 DSH 不会加载它们。
 
-本项目是独立的本地桌面壳，不打包或分发 DSH，也不是 DSH 的功能分支或官方发布。App 菜单可同时只读检查 DSD Pancake 的 GitHub 正式 Release（发行版）和当前 DSH 的 npm `latest`（最新发行标签）；两项更新都由用户独立选择。
+本项目是独立的本地桌面壳，不打包或分发 DSH，也不是 DSH 的功能分支或官方发布。App 每小时在后台分别只读检查 DSD Pancake 的 GitHub 正式 Release（发行版）和当前 DSH 的 npm `latest`（最新发行标签），并只保存最近检查时间与最小版本缓存；发现更新时仅显示壳层标题栏图标，两个更新都始终由用户独立选择。
 
 ## 它做什么
 
 - 打开固定的本机地址 `http://127.0.0.1:3080/`；
 - 端口空闲时，调用用户当前安装的 DSH；可用时以该次进程专属的 `--patch` 覆盖层加载 App 私有插件；
 - 对本次 App 创建且已验证归属的 DSH，在 App 原生标题栏右侧提供底部终端按钮和 `⌘J`；终端仅停靠在右侧主内容区域，并将对话与输入框顶到其上方，左侧工程栏保持完整可见、可操作；
+- 发现 App 或 DSH 可选更新时，在 App 原生标题栏左侧显示一个更新图标；点击才打开原生 Popover（浮层），不会向 DSH 网页注入图标、按钮或弹窗；
 - 不打开 Terminal.app，不打开默认浏览器；
 - 只会停止当前 App 会话亲自创建、并且仍能验证归属的 DSH 进程；
-- 可从 App 菜单统一检查 DSD Pancake 与 DeepSeek Harness 更新；App 有新版本时只显示下载地址并打开发布页，DSH 只有再次确认后才会更新；
+- 可从 App 菜单立即统一检查 DSD Pancake 与 DeepSeek Harness 更新；App 有新版本时，用户可在 Popover 中下载经过 SHA-256 校验的 DMG 到 Downloads（下载）目录，DSH 只有再次确认后才会更新；
 - 将同源 DSH 页面留在 App 内，把用户点击的外部链接交给默认浏览器；
 - 提供标准 macOS 编辑快捷键、首次 `⌘Q` 退出确认，以及关闭窗口后继续保留当前网页会话的行为。
 
@@ -23,8 +24,8 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 
 底部终端不是网页中的 Shell（命令解释器）模拟器。网页插件只通过 DSH 正式 `sessions` service（会话服务）取得当前 session 的 `cwd`（工作区路径），并向受限原生 bridge（通信桥）同步当前工作区；显示／收起意图、terminal view（终端视图）和 PTY（伪终端）始终由 App 原生壳处理。原生壳还会单向通知已钳制的 dock 高度，插件仅在 DSH 的正式 composer footer（输入框底部扩展位）渲染不可交互占位，用于把对话流顶到终端上方。
 
-- 点击 App 标题栏右侧终端图标、按 `⌘J` 或通过“视图 → 显示/隐藏终端”切换面板；顶部原生 tab bar（标签栏）显示当前工作区的终端标签，`+` 在当前工作区新建独立 shell，点击标签可切换，标签内 `×` 只结束该 shell，最右 `×` 只收起 dock；终端内容与标签栏之间保留约 12pt 视觉缓冲；
-- 面板默认约 280px、最小约 160px、最高为可用窗口高度的 50%，可拖动分隔线调整；DSH 的左侧工程栏与主内容同属一个 `WKWebView`，因此 WebView 保持全高，而右侧对话流为 dock 预留等高空间，消息和输入框会一起上移，不会被终端覆盖；左侧工程栏不会被终端占据或遮住；
+- 点击 App 标题栏右侧终端图标、按 `⌘J` 或通过“视图 → 显示/隐藏终端”切换面板；顶部原生 tab bar（标签栏）显示当前工作区的终端标签，`+` 在当前工作区新建独立 shell，点击标签可切换，标签内 `×` 只结束该 shell，最右 `×` 只收起 dock；标签栏和 shell 画布复用 DSH 右侧对话主表面色，形成连续表面而不额外留出视觉缓冲；
+- 面板默认约 280px、最小约 160px、最高为可用窗口高度的 50%，以 1pt 细分隔线与上方对话区分，线周边仍可拖动调整；DSH 的左侧工程栏与主内容同属一个 `WKWebView`，因此 WebView 保持全高，而右侧对话流为 dock 预留等高空间，消息和输入框会一起上移，不会被终端覆盖；左侧工程栏不会被终端占据或遮住；
 - 每个有效 workspace 在本次 App 运行中可保留多个独立 shell：切换同工作区的不同 DSH 会话会恢复最后选择的标签，切换到其它工作区绝不显示旧终端；
 - 采用 SwiftTerm `1.20.0` 的 `LocalProcessTerminalView`，由 `forkpty` 提供 ANSI、光标、交互输入、resize（尺寸变化）与 Ctrl-C；App 退出或 DSH ownership（进程归属）丢失时会终止本 App 创建的 PTY process group（进程组）；
 - terminal bridge 只接受本机同源主 frame（主页面）的严格枚举消息；不接受命令、脚本、`eval`、环境变量或任意进程参数，也不记录终端输入、输出或路径；
@@ -33,7 +34,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 ## 它明确不做什么
 
 - 不打包 DSH 或 Node.js，不自动安装、升级或降级任何依赖，也不改写用户 DSH profile（配置档）的 package、bundle（插件列表）或 patch（覆盖层）配置、数据库或账号数据；
-- 不下载、安装、替换或重启 DSD Pancake 自身；App 更新检查只显示固定 GitHub 项目的正式 Release 版本与下载地址，由用户自行下载安装；
+- 不在后台自动下载、安装、替换或重启 DSD Pancake；只有用户在原生 Popover 点击“下载更新”后，App 才会下载并校验固定 GitHub Release 的 DMG，之后仍由用户自行打开、退出旧 App 和拖拽安装；
 - 不对手动选择的未知安装、源码 checkout（检出目录）、`npx` 临时运行或 external（外部已有）DSH 执行更新；只有当前可执行文件能解析到同一 npm 的全局 `@deepseek-ai/dsh` 包目录，且用户在弹窗中确认时，才运行固定参数的 npm 更新；
 - 不扫描、接管或停止已存在的本机服务；
 - 不提供网页可调用的通用终端、任意 bridge 命令执行、远程 DSH 管理或跨工作区共享 shell；唯一的本机终端仅面向当前 owned DSH 的有效 workspace；
@@ -53,11 +54,16 @@ App 会依次检查上次手动选择的可执行文件、`/opt/homebrew/bin/dsh
 
 ## 可选更新
 
-打开 macOS App 菜单中的 `检查更新…`，两项检查会独立完成；一项失败不会阻止另一项显示结果。
+App 启动后及之后每隔约一小时，会分别对 App 和 DSH 进行一次静默只读检查。每个来源只记录最近一次尝试时间和可选更新所需的最小版本信息；睡眠恢复后最多补一轮到期检查，不会连续补跑历史时点。检查从不自动弹窗、下载或安装。若发现至少一项更新，App 原生标题栏左侧会以强调色显示更新图标；点击后显示原生 Popover。macOS App 菜单中的 `检查更新…` 可立即同时刷新两项结果；用户主动检查过后，即使没有可选更新，图标仍会在本次启动中以中性色保留，可查看该次结果或再次检查。一项失败不会掩盖另一项。
 
 ### DSD Pancake
 
-App 从 `Info.plist` 读取当前版本，对固定公开仓库 `hellokitty-23/dsd-pancake` 的 GitHub `/releases/latest` 发出只读 `HEAD`（仅响应头）请求，并从最终重定向的正式 Release 标签比较 SemVer（语义版本）。该流程不使用需要未登录速率额度的 GitHub REST API。发现新版本时，窗口附属弹窗会显示当前／最新版本和按固定发布命名生成的 DMG（磁盘映像）下载地址；只有用户点击“打开发布页”才会把 GitHub 页面交给默认浏览器。App 不会下载文件、替换正在运行的 bundle（应用包）、启动安装器或重启自身。
+App 从 `Info.plist` 读取当前版本，对固定公开仓库 `hellokitty-23/dsd-pancake` 的 GitHub `/releases/latest` 发出只读 `HEAD`（仅响应头）请求，并从最终重定向的正式 Release 标签比较 SemVer（语义版本）。该流程使用无 Cookie、无凭据缓存的临时会话，不使用需要未登录速率额度的 GitHub REST API。发现新版本时，原生 Popover 显示当前／最新版本：
+
+- 用户打开更新 Popover 后，App 先只读取同一已验证 tag 下固定命名 DMG 的 `.sha256` sidecar（校验文件）；只有 sidecar 严格匹配时才显示“下载更新”，跳转只允许 GitHub 明确受控的 Release 资产主机；
+- 下载先写入 App 自己创建的同目录临时文件，流式计算 SHA-256（安全散列算法）且与 sidecar 精确匹配后才移动到 Downloads；既有同名文件绝不覆盖，会自动加序号；
+- 缺少、格式错误或不匹配的 sidecar 时不下载 DMG，只提供“打开发布页”；下载成功后仍要由用户点击“在 Finder 中显示”或“打开 DMG”，App 不会自动挂载、安装、替换或重启；
+- sidecar 只能证明发布者给出的哈希与文件一致，不能替代 Developer ID（开发者身份）签名或 Apple notarization（公证）。
 
 “关于 DSD Pancake”窗口也提供可点击的 [GitHub 项目地址](https://github.com/hellokitty-23/dsd-pancake)。
 
@@ -82,7 +88,7 @@ zsh scripts/local-release/build-release.zsh
 
 `scripts/verify.zsh` 会跳过对当前正在使用的 `127.0.0.1:3080` 的 HTTP 探测；其余检查只使用受控子进程和随机端口测试夹具。
 
-打包完成后会得到 `local-release/DSD Pancake.dmg`，同时保留 `.app`、ZIP 和 build plist（构建映射文件）。发给用户时优先提供 DMG（磁盘映像）：用户打开后，将 `DSD Pancake.app` 拖到同一窗口中的 `Applications` 快捷入口即可；已有同名 App 时选择“替换”，随后从“应用程序”启动它。
+打包完成后会得到类似 `local-release/DSD-Pancake-v0.0.3-arm64.dmg` 及同名 `.sha256` sidecar，同时保留 `.app`、ZIP 和 build plist（构建映射文件）。公开发布时必须把 DMG 与 sidecar 一起上传。用户下载后可让 App 校验，也可使用 `shasum -a 256` 手动核对 sidecar；随后打开 DMG，将 `DSD Pancake.app` 拖到同一窗口中的 `Applications` 快捷入口即可。已有同名 App 时选择“替换”，随后从“应用程序”启动它。
 
 打包脚本会在组装完成后使用 macOS 自带的 `codesign --sign -` 做本机 ad-hoc（无身份）签名，以便系统可靠识别 App 身份并登记通知权限。这不需要 Xcode、Apple 开发者账号、证书或公证，也不会自动写入 `/Applications` 或安装 DSH。DMG 只改善拖拽安装体验，不会把 App 变成 Developer ID（开发者身份）签名或已公证软件；若要面向陌生用户公开发布，仍应另行建立 Developer ID 签名、hardened runtime（强化运行时）与 Apple notarization（公证）流程。
 

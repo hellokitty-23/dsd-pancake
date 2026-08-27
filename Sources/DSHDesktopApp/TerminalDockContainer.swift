@@ -25,6 +25,9 @@ final class TerminalDockContainer: NSView {
     var onCloseTerminalRequested: ((UUID) -> Void)?
 
     private let webView: WKWebView
+    /// 不能把 WKWebView 本身设为 hidden：WebKit 可能因此延迟首帧，导致启动等待
+    /// 与网页绘制互相阻塞。这个不透明覆盖层只遮挡视觉输出，网页继续正常加载。
+    private let loadingCover = NSView()
     private let terminalPanel = TerminalPanelView()
     private let divider = TerminalDockDividerView()
     private var isPanelVisible = false
@@ -41,6 +44,9 @@ final class TerminalDockContainer: NSView {
 
         webView.removeFromSuperview()
         addSubview(webView)
+        loadingCover.wantsLayer = true
+        loadingCover.layer?.backgroundColor = AppLaunchSurface.color.cgColor
+        addSubview(loadingCover)
         addSubview(terminalPanel)
         addSubview(divider)
         terminalPanel.isHidden = true
@@ -66,8 +72,26 @@ final class TerminalDockContainer: NSView {
 
     override func layout() {
         super.layout()
+        loadingCover.frame = bounds
         guard !isAnimatingLayout else { return }
         applyFrames(TerminalDockLayoutForCurrentBounds(), animated: false)
+    }
+
+    /// 可见分隔线只有 1pt，但仍保留相邻的透明拖拽热区。这样终端像从对话下方自然
+    /// 延展出来，同时不牺牲鼠标调整高度的可用性。
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if isPanelVisible,
+           !divider.isHidden,
+           dividerDragHitFrame.contains(point) {
+            return divider
+        }
+        return super.hitTest(point)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard isPanelVisible, !divider.isHidden else { return }
+        addCursorRect(dividerDragHitFrame, cursor: .resizeUpDown)
     }
 
     func apply(
@@ -110,6 +134,20 @@ final class TerminalDockContainer: NSView {
         sidebarWidth = normalized
         guard !isAnimatingLayout else { return }
         applyFrames(TerminalDockLayoutForCurrentBounds(), animated: false)
+    }
+
+    /// 终端属于 DSH 右侧主内容区，因此它的画布与标签栏都复用同一主表面色，而不是
+    /// 采用系统 text background（文本背景）形成偏灰的第二层。
+    func setMainSurfaceColor(_ color: NSColor?) {
+        terminalPanel.setMainSurfaceColor(color)
+    }
+
+    /// SwiftUI 遮罩的首次挂载与 `NSViewRepresentable`（原生视图包装器）不同步时，
+    /// 此原生覆盖层仍可挡住 WebKit 的默认白色首帧。它不隐藏 WebView，避免阻塞网页
+    /// 的导航与渲染。
+    func setLoadingCoverVisible(_ visible: Bool) {
+        loadingCover.frame = bounds
+        loadingCover.isHidden = !visible
     }
 
     private func TerminalDockLayoutForCurrentBounds() -> TerminalDockLayout {
@@ -155,6 +193,7 @@ final class TerminalDockContainer: NSView {
             webView.frame = webFrame
             divider.frame = dividerFrame
             terminalPanel.frame = panelFrame
+            window?.invalidateCursorRects(for: self)
             return
         }
 
@@ -173,8 +212,15 @@ final class TerminalDockContainer: NSView {
                 guard let self else { return }
                 self.isAnimatingLayout = false
                 self.needsLayout = true
+                self.window?.invalidateCursorRects(for: self)
             }
         }
+    }
+
+    private var dividerDragHitFrame: NSRect {
+        divider.frame
+            .insetBy(dx: 0, dy: -TerminalDockDividerView.dragHitInset)
+            .intersection(bounds)
     }
 
     private func publishConversationReservation(_ height: CGFloat) {
@@ -241,10 +287,7 @@ final class TerminalDockContainer: NSView {
 }
 
 private final class TerminalDockDividerView: NSView {
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .resizeUpDown)
-    }
+    static let dragHitInset: CGFloat = 4
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.separatorColor.setFill()
@@ -259,8 +302,7 @@ private final class TerminalPanelView: NSView {
     var onCloseTerminalRequested: ((UUID) -> Void)?
 
     private let headerHeight: CGFloat = 38
-    private let topContentInset: CGFloat = 12
-    private let header = NSVisualEffectView()
+    private let header = NSView()
     private let tabScrollView = NSScrollView()
     private let tabStrip = NSView()
     private let newTabButton = NSButton()
@@ -268,6 +310,7 @@ private final class TerminalPanelView: NSView {
     private let terminalContent = NSView()
     private let emptyLabel = NSTextField(labelWithString: "正在准备终端…")
     private weak var currentTerminalView: NSView?
+    private var mainSurfaceColor: NSColor?
     private var tabViews: [UUID: TerminalTabView] = [:]
     private var tabOrder: [UUID] = []
     private var pendingActiveTabID: UUID?
@@ -275,11 +318,11 @@ private final class TerminalPanelView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        header.wantsLayer = true
+        terminalContent.wantsLayer = true
+        applyMainSurfaceColor()
 
-        header.material = .headerView
-        header.blendingMode = .withinWindow
-        header.state = .active
+        // 标签栏与 terminal 内容继承同一层背景，不用单独材质把它们切成两个面板。
         addSubview(header)
 
         configureTabScrollView()
@@ -331,6 +374,11 @@ private final class TerminalPanelView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyMainSurfaceColor()
+    }
+
     override func layout() {
         super.layout()
         let resolvedHeaderHeight = min(headerHeight, bounds.height)
@@ -358,13 +406,13 @@ private final class TerminalPanelView: NSView {
         tabScrollView.frame = tabViewport
         layoutTabStrip(availableWidth: tabViewport.width, tabHeight: tabHeight)
 
-        // 标签栏说明当前 shell 的归属；其下保留很小的视觉缓冲，避免首行终端文字
-        // 贴着 header 边界。
+        // 标签栏仅负责归属与切换；内容从其下方直接延续，避免形成一个独立的 header
+        // 卡片或多余留白。
         terminalContent.frame = NSRect(
             x: bounds.minX,
             y: bounds.minY,
             width: bounds.width,
-            height: max(0, bounds.height - resolvedHeaderHeight - topContentInset)
+            height: max(0, bounds.height - resolvedHeaderHeight)
         )
         currentTerminalView?.frame = terminalContent.bounds
 
@@ -388,6 +436,18 @@ private final class TerminalPanelView: NSView {
         view.frame = terminalContent.bounds
         view.autoresizingMask = [.width, .height]
         terminalContent.addSubview(view)
+    }
+
+    func setMainSurfaceColor(_ color: NSColor?) {
+        mainSurfaceColor = color
+        applyMainSurfaceColor()
+    }
+
+    private func applyMainSurfaceColor() {
+        let color = mainSurfaceColor ?? .textBackgroundColor
+        layer?.backgroundColor = color.cgColor
+        header.layer?.backgroundColor = color.cgColor
+        terminalContent.layer?.backgroundColor = color.cgColor
     }
 
     private func configureTabScrollView() {
@@ -623,14 +683,19 @@ private final class TerminalTabView: NSView {
 struct TerminalDockHost: NSViewRepresentable {
     let container: WebContainer
     let terminalController: DesktopTerminalController
+    /// `NSViewRepresentable` 不能只依赖 `WebContainer` 的对象身份判断刷新；加载状态
+    /// 必须作为值类型输入传入，才能保证原生遮罩在网页首帧完成后立刻撤掉。
+    let isPageLoading: Bool
 
     func makeNSView(context: Context) -> TerminalDockContainer {
         let dock = TerminalDockContainer(webView: container.webView)
+        dock.setLoadingCoverVisible(isPageLoading)
         terminalController.attach(dock: dock)
         return dock
     }
 
     func updateNSView(_ dock: TerminalDockContainer, context: Context) {
+        dock.setLoadingCoverVisible(isPageLoading)
         terminalController.attach(dock: dock)
     }
 

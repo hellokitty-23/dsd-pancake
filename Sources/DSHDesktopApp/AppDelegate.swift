@@ -1,72 +1,16 @@
 import AppKit
 import DSHDesktopCore
 
-private enum AppCheckResult {
-    case available(AppUpdateCheck)
-    case current(AppUpdateCheck)
-    case failed(String)
-
-    var hasUpdate: Bool {
-        if case .available = self { return true }
-        return false
-    }
-
-    var summary: String {
-        switch self {
-        case let .available(check):
-            let address = check.downloadURL ?? check.releasePageURL
-            return "DSD Pancake：可选更新 \(check.currentVersion) → \(check.latestVersion)\n"
-                + "下载地址：\(address.absoluteString)"
-        case let .current(check):
-            switch check.disposition {
-            case .upToDate:
-                return "DSD Pancake：已是最新版本 \(check.currentVersion) (\(check.currentBuild))"
-            case .newerThanLatest:
-                return "DSD Pancake：当前版本 \(check.currentVersion) 高于 GitHub latest \(check.latestVersion)"
-            case .updateAvailable:
-                return "DSD Pancake：发现可选更新 \(check.latestVersion)"
-            }
-        case let .failed(message):
-            return "DSD Pancake：检查失败\n\(message)"
-        }
-    }
-}
-
-private enum DSHCheckResult {
-    case available(DSHUpdateCheck)
-    case current(DSHUpdateCheck)
-    case failed(String)
-
-    var hasUpdate: Bool {
-        if case .available = self { return true }
-        return false
-    }
-
-    var summary: String {
-        switch self {
-        case let .available(check):
-            return "DeepSeek Harness：可选更新 \(check.currentVersion) → \(check.latestVersion)"
-        case let .current(check):
-            switch check.disposition {
-            case .upToDate:
-                return "DeepSeek Harness：已是最新版本 \(check.currentVersion)"
-            case .newerThanLatest:
-                return "DeepSeek Harness：当前版本 \(check.currentVersion) 高于 npm latest \(check.latestVersion)"
-            case .updateAvailable:
-                return "DeepSeek Harness：发现可选更新 \(check.latestVersion)"
-            }
-        case let .failed(message):
-            return "DeepSeek Harness：检查失败\n\(message)"
-        }
-    }
-}
-
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var coordinator: AppCoordinator?
     private let preferences = UserPreferences()
-    private let appUpdateService = AppUpdateService()
     private let dshUpdateService = DSHUpdateService()
+    private lazy var updateStatus = UpdateStatusController(
+        preferences: preferences,
+        dshUpdateService: dshUpdateService
+    )
+    private let updatePopover = UpdatePopoverController()
     private var completionNotificationModeMenuItems: [DesktopNotificationDeliveryMode: NSMenuItem] = [:]
     private var checkUpdatesMenuItem: NSMenuItem?
     private var updateTask: Task<Void, Never>?
@@ -176,6 +120,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             )
             self.coordinator = coordinator
             coordinator.installMainWindow()
+            updateStatus.onAvailabilityChange = { [weak self] availability in
+                self?.coordinator?.setUpdateAvailability(availability)
+                self?.updatePopover.updateAvailability(availability)
+            }
+            coordinator.onUpdateIndicatorPressed = { [weak self] button in
+                self?.updatePopover.toggle(relativeTo: button)
+            }
+            updatePopover.onRequestDSHUpdate = { [weak self] _ in
+                self?.startDSHUpdateFromPopover()
+            }
+            updatePopover.onRequestManualCheck = { [weak self] in
+                self?.startManualUpdateCheck()
+            }
+            updateStatus.start()
             coordinator.prepareNotificationAuthorization()
             coordinator.beginStartup()
         } catch {
@@ -187,6 +145,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         false
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        updateStatus.stop()
+        updatePopover.cancelDownload()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         coordinator?.restoreMainWindow()
         return true
@@ -194,17 +157,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if updateTask != nil {
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = "更新流程尚未结束"
-            alert.informativeText = "请等待检查或可选更新完成后再退出 DSD Pancake，避免中断 npm。"
-            alert.addButton(withTitle: "知道了")
-            if let window = coordinator?.alertHostWindow, window.attachedSheet == nil {
-                alert.beginSheetModal(for: window)
-            }
-            return .terminateCancel
+            return cancelTerminationWithAlert(
+                title: "更新流程尚未结束",
+                message: "请等待检查或可选更新完成后再退出 DSD Pancake，避免中断 npm。"
+            )
+        }
+        if updateStatus.isChecking {
+            return cancelTerminationWithAlert(
+                title: "正在检查更新",
+                message: "请等待本次只读检查结束后再退出，或稍后重试。"
+            )
+        }
+        if updatePopover.isDownloading {
+            return cancelTerminationWithAlert(
+                title: "正在下载更新",
+                message: "请先在更新浮层中取消或等待下载完成，避免留下不完整文件。"
+            )
         }
         return coordinator?.applicationShouldTerminate() ?? .terminateNow
+    }
+
+    private func cancelTerminationWithAlert(
+        title: String,
+        message: String
+    ) -> NSApplication.TerminateReply {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "知道了")
+        if let window = coordinator?.alertHostWindow, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window)
+        }
+        return .terminateCancel
     }
 
     /// 首次 `⌘Q` 仍交给 AppKit 发起正常退出；当 AppKit 已处于 `.terminateLater`
@@ -218,9 +203,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func checkForUpdates(_ sender: NSMenuItem) {
-        guard updateTask == nil else { return }
-        sender.isEnabled = false
-        sender.title = "正在检查更新…"
+        startManualUpdateCheck()
+    }
+
+    private func startManualUpdateCheck() {
+        guard updateTask == nil, !updateStatus.isChecking else { return }
+        checkUpdatesMenuItem?.isEnabled = false
+        checkUpdatesMenuItem?.title = "正在检查更新…"
         updateTask = Task { @MainActor [weak self] in
             await self?.runUpdateFlow()
         }
@@ -242,68 +231,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return
         }
 
-        async let appOutcome = checkAppUpdate()
-        async let dshOutcome = checkDSHUpdate()
-        let (appResult, dshResult) = await (appOutcome, dshOutcome)
-        let hasOptionalUpdate = appResult.hasUpdate || dshResult.hasUpdate
+        guard let report = await updateStatus.checkManually() else { return }
+        coordinator.recordManualUpdateCheckResult()
+        updatePopover.recordManualCheck(report)
+        let hasOptionalUpdate = report.hasOptionalUpdate || updateStatus.availability.hasUpdates
         let summaryResponse = await presentUpdateAlert(
             title: "更新检查完成",
-            message: appResult.summary + "\n\n" + dshResult.summary,
-            primaryButton: hasOptionalUpdate ? "选择更新" : "好",
+            message: report.summary,
+            primaryButton: hasOptionalUpdate ? "查看可选更新" : "好",
             secondaryButton: hasOptionalUpdate ? "稍后" : nil
         )
         guard hasOptionalUpdate, summaryResponse == .alertFirstButtonReturn else { return }
+        coordinator.presentAvailableUpdatesFromMenu()
+    }
 
-        if case let .available(check) = dshResult {
+    private func startDSHUpdateFromPopover() {
+        guard updateTask == nil, !updateStatus.isChecking else { return }
+        updateTask = Task { @MainActor [weak self] in
+            await self?.runDSHUpdateFromPopover()
+        }
+    }
+
+    private func runDSHUpdateFromPopover() async {
+        defer {
+            checkUpdatesMenuItem?.title = "检查更新…"
+            checkUpdatesMenuItem?.isEnabled = true
+            updateTask = nil
+        }
+        guard let coordinator else {
+            await presentUpdateAlert(
+                title: "DSD Pancake 尚未准备好",
+                message: "主窗口完成启动后再更新 DeepSeek Harness。",
+                style: .warning
+            )
+            return
+        }
+        guard let result = await updateStatus.checkDSHForExplicitUpdate() else { return }
+        switch result {
+        case let .available(check):
             await offerDSHUpdate(check, coordinator: coordinator)
-        }
-        if case let .available(check) = appResult {
-            await offerAppUpdate(check)
-        }
-    }
-
-    private func checkAppUpdate() async -> AppCheckResult {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? "未知"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-            ?? "未知"
-        do {
-            let check = try await appUpdateService.check(currentVersion: version, currentBuild: build)
-            return check.disposition == .updateAvailable ? .available(check) : .current(check)
-        } catch is CancellationError {
-            return .failed("检查已取消。")
-        } catch {
-            return .failed(error.localizedDescription)
-        }
-    }
-
-    private func checkDSHUpdate() async -> DSHCheckResult {
-        guard let executable = DSHLocator().locate(lastChosenPath: preferences.selectedDSHPath) else {
-            return .failed("未找到可执行的 dsh；App 更新检查仍已独立完成。")
-        }
-        do {
-            let check = try await dshUpdateService.check(executable: executable)
-            return check.disposition == .updateAvailable ? .available(check) : .current(check)
-        } catch is CancellationError {
-            return .failed("检查已取消。")
-        } catch {
-            return .failed(error.localizedDescription)
-        }
-    }
-
-    private func offerAppUpdate(_ check: AppUpdateCheck) async {
-        let downloadAddress = check.downloadURL ?? check.releasePageURL
-        let response = await presentUpdateAlert(
-            title: "DSD Pancake 有新版本",
-            message: "当前版本：\(check.currentVersion) (\(check.currentBuild))\n"
-                + "最新版本：\(check.latestVersion)\n\n"
-                + "下载地址：\n\(downloadAddress.absoluteString)\n\n"
-                + "DSD Pancake 不会自动下载、安装、替换或重启 App。",
-            primaryButton: "打开发布页",
-            secondaryButton: "稍后"
-        )
-        if response == .alertFirstButtonReturn {
-            NSWorkspace.shared.open(check.releasePageURL)
+        case let .current(check):
+            await presentUpdateAlert(
+                title: "DeepSeek Harness 已是最新版本",
+                message: DSHCheckResult.current(check).summary
+            )
+        case let .failed(message):
+            await presentUpdateAlert(
+                title: "无法检查 DeepSeek Harness 更新",
+                message: message,
+                style: .warning
+            )
         }
     }
 
@@ -348,6 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         do {
             let result = try await dshUpdateService.update(using: check)
             coordinator.finishDSHUpdateAndRestart()
+            updateStatus.clearCachedDSHUpdate()
             await presentUpdateAlert(
                 title: "DeepSeek Harness 更新完成",
                 message: "\(result.previousVersion) → \(result.installedVersion)\n\n"
@@ -446,6 +424,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates(_:)) {
+            return updateTask == nil && !updateStatus.isChecking
+        }
         guard menuItem.action == #selector(toggleTerminalPanel(_:)) else { return true }
         menuItem.state = coordinator?.isTerminalPanelVisible == true ? .on : .off
         return coordinator?.canToggleTerminalPanel == true

@@ -12,6 +12,7 @@ public struct AppUpdateCheck: Equatable, Sendable {
     public let latestVersion: SemanticVersion
     public let releasePageURL: URL
     public let downloadURL: URL?
+    public let checksumURL: URL?
     public let disposition: AppUpdateDisposition
 
     public init(
@@ -19,13 +20,15 @@ public struct AppUpdateCheck: Equatable, Sendable {
         currentBuild: String,
         latestVersion: SemanticVersion,
         releasePageURL: URL,
-        downloadURL: URL?
+        downloadURL: URL?,
+        checksumURL: URL? = nil
     ) {
         self.currentVersion = currentVersion
         self.currentBuild = currentBuild
         self.latestVersion = latestVersion
         self.releasePageURL = releasePageURL
         self.downloadURL = downloadURL
+        self.checksumURL = checksumURL
         if currentVersion < latestVersion {
             disposition = .updateAvailable
         } else if currentVersion == latestVersion {
@@ -78,7 +81,7 @@ public struct AppUpdateService: Sendable {
     public func check(
         currentVersion: String,
         currentBuild: String,
-        session: URLSession = .shared
+        session: URLSession? = nil
     ) async throws -> AppUpdateCheck {
         guard let parsedCurrentVersion = SemanticVersion(currentVersion) else {
             throw AppUpdateError.invalidCurrentVersion(currentVersion)
@@ -92,6 +95,7 @@ public struct AppUpdateService: Sendable {
         request.httpMethod = "HEAD"
         request.setValue("DSD-Pancake/\(parsedCurrentVersion)", forHTTPHeaderField: "User-Agent")
 
+        let session = session ?? Self.makeEphemeralSession()
         let (_, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AppUpdateError.invalidHTTPResponse
@@ -127,13 +131,21 @@ public struct AppUpdateService: Sendable {
         guard tag == "v\(latestVersion)", !latestVersion.isPrerelease else {
             throw AppUpdateError.unstableRelease
         }
+        let assetFilename = Self.assetFilename(for: latestVersion)
         let downloadAddress = Self.repositoryURL.absoluteString
-            + "/releases/download/\(tag)/DSD-Pancake-\(tag)-arm64.dmg"
+            + "/releases/download/\(tag)/\(assetFilename)"
         guard let downloadURL = trustedGitHubURL(
             URL(string: downloadAddress),
             requiredPathPrefix: downloadPathPrefix
         ) else {
             throw AppUpdateError.untrustedReleaseURL(downloadAddress)
+        }
+        let checksumAddress = downloadAddress + ".sha256"
+        guard let checksumURL = trustedGitHubURL(
+            URL(string: checksumAddress),
+            requiredPathPrefix: downloadPathPrefix
+        ) else {
+            throw AppUpdateError.untrustedReleaseURL(checksumAddress)
         }
 
         return AppUpdateCheck(
@@ -141,8 +153,97 @@ public struct AppUpdateService: Sendable {
             currentBuild: currentBuild,
             latestVersion: latestVersion,
             releasePageURL: releasePageURL,
-            downloadURL: downloadURL
+            downloadURL: downloadURL,
+            checksumURL: checksumURL
         )
+    }
+
+    /// 缓存中只保存正式 SemVer（语义版本）；恢复时重新生成固定仓库的 Release 与资产地址，
+    /// 因此不会把过期的重定向 URL 或外部输入持久化为下载来源。
+    public static func cachedCheck(
+        currentVersion: String,
+        currentBuild: String,
+        latestVersion: String
+    ) -> AppUpdateCheck? {
+        guard let currentVersion = SemanticVersion(currentVersion),
+              let latestVersion = SemanticVersion(latestVersion),
+              !latestVersion.isPrerelease,
+              let releasePageURL = releasePageURL(for: latestVersion),
+              let downloadURL = downloadURL(for: latestVersion),
+              let checksumURL = checksumURL(for: latestVersion) else {
+            return nil
+        }
+        return AppUpdateCheck(
+            currentVersion: currentVersion,
+            currentBuild: currentBuild,
+            latestVersion: latestVersion,
+            releasePageURL: releasePageURL,
+            downloadURL: downloadURL,
+            checksumURL: checksumURL
+        )
+    }
+
+    public static func assetFilename(for version: SemanticVersion) -> String {
+        "DSD-Pancake-v\(version)-arm64.dmg"
+    }
+
+    public static func releasePageURL(for version: SemanticVersion) -> URL? {
+        guard !version.isPrerelease else { return nil }
+        return trustedGitHubURL(
+            repositoryURL.appending(path: "releases/tag/v\(version)"),
+            requiredPathPrefix: releasePathPrefix
+        )
+    }
+
+    public static func downloadURL(for version: SemanticVersion) -> URL? {
+        guard !version.isPrerelease else { return nil }
+        return trustedGitHubURL(
+            repositoryURL.appending(path: "releases/download/v\(version)/\(assetFilename(for: version))"),
+            requiredPathPrefix: downloadPathPrefix
+        )
+    }
+
+    public static func checksumURL(for version: SemanticVersion) -> URL? {
+        guard let downloadURL = downloadURL(for: version) else { return nil }
+        return trustedGitHubURL(
+            URL(string: downloadURL.absoluteString + ".sha256"),
+            requiredPathPrefix: downloadPathPrefix
+        )
+    }
+
+    package static func isTrustedReleaseAssetRedirect(
+        _ url: URL?,
+        expectedInitialURL: URL
+    ) -> Bool {
+        guard let url,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.port == nil,
+              components.user == nil,
+              components.password == nil else {
+            return false
+        }
+
+        let host = components.host?.lowercased() ?? ""
+        if host == "github.com" {
+            return url == expectedInitialURL
+        }
+
+        // GitHub Release 资产会在同一次请求中跳转至其受控的下载主机。只允许 HTTPS、
+        // 无用户信息／自定义端口的显式主机集合；不接受任意 CDN、任意子域或任意初始 URL。
+        let allowedReleaseAssetHosts: Set<String> = [
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-production-release-asset-2e65be.s3.amazonaws.com",
+        ]
+        return allowedReleaseAssetHosts.contains(host) && !components.path.isEmpty
+    }
+
+    private static func makeEphemeralSession() -> URLSession {
+        URLSession(configuration: UpdateNetworkPolicy.makeEphemeralConfiguration(
+            requestTimeout: 15,
+            resourceTimeout: 15
+        ))
     }
 
     private static func trustedGitHubURL(_ value: URL?, requiredPathPrefix: String) -> URL? {

@@ -45,6 +45,10 @@ struct DSHDesktopVerification {
             try verifyAppUpdateFoundation()
         } failures: { failures.append($0) }
 
+        await run("自动更新检查与安全下载基础设施") {
+            try await verifyAutomaticUpdateAndDownloadFoundation()
+        } failures: { failures.append($0) }
+
         await run("App 私有提醒插件与桥协议") {
             try verifyNotificationPluginAndBridgeProtocol()
         } failures: { failures.append($0) }
@@ -389,13 +393,19 @@ struct DSHDesktopVerification {
                 == "https://github.com/hellokitty-23/dsd-pancake/releases/download/v0.0.2/DSD-Pancake-v0.0.2-arm64.dmg",
             "App 更新检查没有生成受约束的 arm64 DMG 下载地址"
         )
+        try expect(
+            check.checksumURL?.absoluteString
+                == "https://github.com/hellokitty-23/dsd-pancake/releases/download/v0.0.2/DSD-Pancake-v0.0.2-arm64.dmg.sha256",
+            "App 更新检查没有生成与 DMG 对应的 SHA-256 校验地址"
+        )
 
         let sameVersion = AppUpdateCheck(
             currentVersion: currentVersion,
             currentBuild: "36",
             latestVersion: currentVersion,
             releasePageURL: check.releasePageURL,
-            downloadURL: check.downloadURL
+            downloadURL: check.downloadURL,
+            checksumURL: check.checksumURL
         )
         try expect(sameVersion.disposition == .upToDate, "相同 App 版本未判定为最新")
 
@@ -426,6 +436,472 @@ struct DSHDesktopVerification {
                 throw VerificationError("预发布 App Release 返回了错误类型：\(error)")
             }
         }
+    }
+
+    private static func verifyAutomaticUpdateAndDownloadFoundation() async throws {
+        guard let current = SemanticVersion("0.0.1"),
+              let latest = SemanticVersion("0.0.2") else {
+            throw VerificationError("无法构造自动更新检查版本 fixture")
+        }
+
+        let origin = Date(timeIntervalSince1970: 1_000_000)
+        let schedule = AutomaticUpdateCheckSchedule.hourly
+        try expect(
+            schedule.dueSources(lastAppCheckAt: nil, lastDSHCheckAt: nil, now: origin) == [.app, .dsh],
+            "首次启动没有同时检查 App 和 DSH"
+        )
+        try expect(
+            schedule.dueSources(
+                lastAppCheckAt: origin,
+                lastDSHCheckAt: origin,
+                now: origin.addingTimeInterval(59 * 60)
+            ).isEmpty,
+            "未满一小时错误触发自动检查"
+        )
+        try expect(
+            schedule.dueSources(
+                lastAppCheckAt: origin,
+                lastDSHCheckAt: origin,
+                now: origin.addingTimeInterval(60 * 60)
+            ) == [.app, .dsh],
+            "恰满一小时没有触发独立自动检查"
+        )
+        try expect(
+            schedule.dueSources(
+                lastAppCheckAt: origin.addingTimeInterval(60 * 60),
+                lastDSHCheckAt: origin,
+                now: origin.addingTimeInterval(60 * 60)
+            ) == [.dsh],
+            "手动刷新 App 后错误重复检查 App，或遗漏到期 DSH"
+        )
+        try expect(
+            schedule.nextCheckAt(
+                lastAppCheckAt: origin.addingTimeInterval(-2 * 60 * 60),
+                lastDSHCheckAt: origin.addingTimeInterval(-3 * 60 * 60),
+                now: origin
+            ) == origin,
+            "睡眠恢复后下一次检查不应补跑多个历史时点"
+        )
+
+        let cachedApp = CachedAppUpdate(latestVersion: latest)
+        try expect(cachedApp.applies(to: current), "较新的 App 缓存没有恢复为提示")
+        try expect(!cachedApp.applies(to: latest), "相同 App 版本错误保留旧提示")
+
+        let cachedDSH = CachedDSHUpdate(
+            executablePath: "/opt/homebrew/bin/dsh",
+            currentVersion: current,
+            latestVersion: latest
+        )
+        try expect(
+            cachedDSH.applies(to: "/opt/homebrew/bin/dsh", currentVersion: current),
+            "同一路径和版本的 DSH 缓存没有恢复"
+        )
+        try expect(
+            !cachedDSH.applies(to: "/usr/local/bin/dsh", currentVersion: current)
+                && !cachedDSH.applies(to: "/opt/homebrew/bin/dsh", currentVersion: latest),
+            "路径或当前版本变化后仍错误保留 DSH 缓存"
+        )
+
+        var cacheState = AutomaticUpdateCheckState(dshUpdate: cachedDSH)
+        let manualCheckAt = origin.addingTimeInterval(123)
+        cacheState.apply(
+            appResult: .available(cachedApp),
+            dshResult: .failed,
+            checkedAt: manualCheckAt
+        )
+        try expect(
+            cacheState.lastAppCheckAt == manualCheckAt
+                && cacheState.lastDSHCheckAt == manualCheckAt
+                && cacheState.appUpdate == cachedApp
+                && cacheState.dshUpdate == cachedDSH,
+            "App 成功与 DSH 失败没有独立刷新时间并保留既有缓存"
+        )
+        try expect(
+            cacheState.availableUpdateCount == 2
+                && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 2) == "发现 2 项可选更新"
+                && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 1) == "发现 1 项可选更新"
+                && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 0) == nil
+                && UpdateIndicatorPresentation.isVisible(
+                    forAvailableUpdateCount: 0,
+                    hasManualCheckResult: true
+                )
+                && UpdateIndicatorPresentation.label(
+                    forAvailableUpdateCount: 0,
+                    hasManualCheckResult: true
+                ) == "查看最近一次更新检查结果",
+            "标题栏更新图标的可见性或可访问标签不符合独立更新状态"
+        )
+
+        let laterCheckAt = manualCheckAt.addingTimeInterval(1)
+        cacheState.apply(
+            appResult: .current,
+            dshResult: .available(cachedDSH),
+            checkedAt: laterCheckAt
+        )
+        try expect(
+            cacheState.lastAppCheckAt == laterCheckAt
+                && cacheState.lastDSHCheckAt == laterCheckAt
+                && cacheState.appUpdate == nil
+                && cacheState.dshUpdate == cachedDSH,
+            "手动检查后的 current / available 独立归约不正确"
+        )
+
+        cacheState.invalidateDSHUpdate(
+            executablePath: "/usr/local/bin/dsh",
+            currentVersion: current
+        )
+        try expect(cacheState.dshUpdate == nil, "DSH 路径变化后没有失效旧更新缓存")
+        cacheState = AutomaticUpdateCheckState(appUpdate: cachedApp)
+        cacheState.invalidateAppUpdate(for: latest)
+        try expect(cacheState.appUpdate == nil, "App 版本追平后没有失效旧更新缓存")
+
+        guard let cachedCheck = AppUpdateService.cachedCheck(
+            currentVersion: current.rawValue,
+            currentBuild: "36",
+            latestVersion: latest.rawValue
+        ) else {
+            throw VerificationError("App 缓存无法恢复固定 Release 地址")
+        }
+        try expect(
+            cachedCheck.disposition == .updateAvailable
+                && cachedCheck.downloadURL?.lastPathComponent == "DSD-Pancake-v0.0.2-arm64.dmg"
+                && cachedCheck.checksumURL?.lastPathComponent == "DSD-Pancake-v0.0.2-arm64.dmg.sha256",
+            "App 缓存没有以固定 Release 文件名恢复可选更新"
+        )
+        let fixedURLs = try AppReleaseDownloadService.fixedReleaseURLs(for: cachedCheck)
+        try expect(
+            fixedURLs.0 == cachedCheck.downloadURL && fixedURLs.1 == cachedCheck.checksumURL,
+            "安全下载没有接受由固定 Release tag 推导出的地址"
+        )
+
+        let forgedAssetCheck = AppUpdateCheck(
+            currentVersion: current,
+            currentBuild: "36",
+            latestVersion: latest,
+            releasePageURL: cachedCheck.releasePageURL,
+            downloadURL: URL(string: "https://objects.githubusercontent.com/forged.dmg")!,
+            checksumURL: URL(string: "https://objects.githubusercontent.com/forged.dmg.sha256")!
+        )
+        do {
+            _ = try AppReleaseDownloadService.fixedReleaseURLs(for: forgedAssetCheck)
+            throw VerificationError("下载器错误接受了非固定 GitHub 初始地址")
+        } catch let error as AppReleaseDownloadError {
+            try expect(
+                error == .untrustedRedirect("https://objects.githubusercontent.com/forged.dmg"),
+                "伪造 Release 资产地址返回了错误类型：\(error)"
+            )
+        }
+
+        guard let initialURL = cachedCheck.downloadURL else {
+            throw VerificationError("缺少固定 DMG 初始地址")
+        }
+        try expect(
+            AppUpdateService.isTrustedReleaseAssetRedirect(initialURL, expectedInitialURL: initialURL),
+            "固定 GitHub 初始地址错误被拒绝"
+        )
+        try expect(
+            AppUpdateService.isTrustedReleaseAssetRedirect(
+                URL(string: "https://objects.githubusercontent.com/github-production-release-asset/example")!,
+                expectedInitialURL: initialURL
+            ),
+            "GitHub 受控 Release 资产主机错误被拒绝"
+        )
+        try expect(
+            !AppUpdateService.isTrustedReleaseAssetRedirect(
+                URL(string: "https://github.com/hellokitty-23/dsd-pancake/releases/download/v0.0.2/other.dmg")!,
+                expectedInitialURL: initialURL
+            )
+                && !AppUpdateService.isTrustedReleaseAssetRedirect(
+                    URL(string: "https://downloads.example.com/DSD-Pancake-v0.0.2-arm64.dmg")!,
+                    expectedInitialURL: initialURL
+                ),
+            "非固定 GitHub 初始地址或任意下载主机错误通过信任边界"
+        )
+
+        let filename = "DSD-Pancake-v0.0.2-arm64.dmg"
+        let expectedHash = String(repeating: "a", count: 64)
+        let validSidecar = Data("\(expectedHash)  \(filename)\n".utf8)
+        try expect(
+            try AppReleaseDownloadService.parseSHA256Sidecar(
+                validSidecar,
+                expectedFilename: filename
+            ) == expectedHash,
+            "严格 SHA-256 sidecar 无法解析"
+        )
+        for invalidSidecar in [
+            Data("\(expectedHash)  other.dmg\n".utf8),
+            Data("\(expectedHash)  \(filename)\n\n".utf8),
+            Data("not-a-hash  \(filename)\n".utf8),
+        ] {
+            do {
+                _ = try AppReleaseDownloadService.parseSHA256Sidecar(
+                    invalidSidecar,
+                    expectedFilename: filename
+                )
+                throw VerificationError("错误接受了格式或文件名不可信的 SHA-256 sidecar")
+            } catch let error as AppReleaseDownloadError {
+                try expect(error == .invalidChecksumFile, "损坏 sidecar 返回了错误类型：\(error)")
+            }
+        }
+
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory.appendingPathComponent(
+            "dsd-pancake-update-download-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let existingFile = directory.appendingPathComponent(filename)
+        try Data("old".utf8).write(to: existingFile, options: .withoutOverwriting)
+        let uniqueDestination = try AppReleaseDownloadService.uniqueDestinationURL(
+            in: directory,
+            filename: filename
+        )
+        try expect(
+            uniqueDestination.lastPathComponent == "DSD-Pancake-v0.0.2-arm64 (1).dmg"
+                && fileManager.fileExists(atPath: existingFile.path),
+            "下载目标没有保留同名既有文件并生成无覆盖名称"
+        )
+
+        let digestFixture = directory.appendingPathComponent("digest-fixture")
+        try Data("abc".utf8).write(to: digestFixture, options: .withoutOverwriting)
+        try expect(
+            try AppReleaseDownloadService.sha256(of: digestFixture)
+                == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "下载文件的 SHA-256 计算错误"
+        )
+
+        let cancelledDownload = AppReleaseDownloadCancellation()
+        cancelledDownload.cancel()
+        try expect(cancelledDownload.isCancelled, "下载取消令牌没有保存已取消状态")
+        do {
+            _ = try AppReleaseDownloadService.sha256(
+                of: digestFixture,
+                cancellation: cancelledDownload
+            )
+            throw VerificationError("已取消下载仍继续计算文件哈希")
+        } catch is CancellationError {
+            // 取消后不读取或保留本次临时文件，是下载器的基础边界。
+        }
+
+        let releaseFixtureDirectory = fileManager.temporaryDirectory.appendingPathComponent(
+            "dsd-pancake-release-download-fixture-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: releaseFixtureDirectory, withIntermediateDirectories: true)
+        defer {
+            ReleaseAssetURLProtocol.reset()
+            try? fileManager.removeItem(at: releaseFixtureDirectory)
+        }
+
+        let fixtureDownloader = AppReleaseDownloadService(
+            makeSessionConfiguration: { requestTimeout, resourceTimeout in
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+                configuration.urlCache = nil
+                configuration.httpCookieStorage = nil
+                configuration.httpShouldSetCookies = false
+                configuration.urlCredentialStorage = nil
+                configuration.timeoutIntervalForRequest = requestTimeout
+                configuration.timeoutIntervalForResource = resourceTimeout
+                configuration.protocolClasses = [ReleaseAssetURLProtocol.self]
+                return configuration
+            }
+        )
+        let fixtureDMG = Data("fixture-dmg-payload".utf8)
+        let fixtureDigestURL = releaseFixtureDirectory.appendingPathComponent("expected-digest")
+        try fixtureDMG.write(to: fixtureDigestURL, options: .withoutOverwriting)
+        let fixtureDigest = try AppReleaseDownloadService.sha256(of: fixtureDigestURL)
+        try fileManager.removeItem(at: fixtureDigestURL)
+        let fixtureSidecar = Data("\(fixtureDigest)  \(filename)\n".utf8)
+
+        ReleaseAssetURLProtocol.install { request in
+            let isChecksum = request.url?.lastPathComponent.hasSuffix(".sha256") == true
+            let body = isChecksum ? fixtureSidecar : fixtureDMG
+            return ReleaseAssetURLProtocol.Fixture(
+                status: 200,
+                headers: [
+                    "Content-Type": isChecksum ? "text/plain" : "application/x-apple-diskimage",
+                    "Content-Length": "\(body.count)",
+                ],
+                body: body
+            )
+        }
+        let preflightDigest = try await fixtureDownloader.verifyChecksum(for: cachedCheck)
+        try expect(
+            preflightDigest == fixtureDigest,
+            "Popover 下载预验证没有接受有效 checksum sidecar"
+        )
+        let currentReleaseCheck = AppUpdateCheck(
+            currentVersion: latest,
+            currentBuild: "37",
+            latestVersion: latest,
+            releasePageURL: cachedCheck.releasePageURL,
+            downloadURL: cachedCheck.downloadURL,
+            checksumURL: cachedCheck.checksumURL
+        )
+        do {
+            _ = try await fixtureDownloader.verifyChecksum(for: currentReleaseCheck)
+            throw VerificationError("当前已是最新版本时仍进入内置下载预验证")
+        } catch let error as AppReleaseDownloadError {
+            try expect(error == .updateNotAvailable, "非可选更新预验证返回了错误类型：\(error)")
+        }
+        let existingDownload = releaseFixtureDirectory.appendingPathComponent(filename)
+        try Data("user-file".utf8).write(to: existingDownload, options: .withoutOverwriting)
+        let downloaded = try await fixtureDownloader.download(
+            check: cachedCheck,
+            downloadsDirectory: releaseFixtureDirectory
+        )
+        let preservedUserFile = try Data(contentsOf: existingDownload)
+        let downloadedDMG = try Data(contentsOf: downloaded.fileURL)
+        let successfulDownloadEntries = try fileManager.contentsOfDirectory(
+            at: releaseFixtureDirectory,
+            includingPropertiesForKeys: nil
+        )
+        try expect(
+            downloaded.fileURL.lastPathComponent == "DSD-Pancake-v0.0.2-arm64 (1).dmg"
+                && preservedUserFile == Data("user-file".utf8)
+                && downloadedDMG == fixtureDMG
+                && successfulDownloadEntries.allSatisfy { !$0.lastPathComponent.hasSuffix(".part") },
+            "受控下载没有保留同名用户文件、验证内容或清理 .part 临时文件"
+        )
+
+        let mismatchDirectory = releaseFixtureDirectory.appendingPathComponent("mismatch", isDirectory: true)
+        try fileManager.createDirectory(at: mismatchDirectory, withIntermediateDirectories: true)
+        ReleaseAssetURLProtocol.install { request in
+            let isChecksum = request.url?.lastPathComponent.hasSuffix(".sha256") == true
+            let body = isChecksum ? fixtureSidecar : Data("tampered-dmg".utf8)
+            return ReleaseAssetURLProtocol.Fixture(
+                status: 200,
+                headers: ["Content-Length": "\(body.count)"],
+                body: body
+            )
+        }
+        do {
+            _ = try await fixtureDownloader.download(
+                check: cachedCheck,
+                downloadsDirectory: mismatchDirectory
+            )
+            throw VerificationError("哈希不匹配的 DMG 错误完成下载")
+        } catch let error as AppReleaseDownloadError {
+            guard case .checksumMismatch = error else {
+                throw VerificationError("哈希不匹配返回了错误类型：\(error)")
+            }
+        }
+        let mismatchEntries = try fileManager.contentsOfDirectory(
+            at: mismatchDirectory,
+            includingPropertiesForKeys: nil
+        )
+        try expect(
+            mismatchEntries.isEmpty,
+            "哈希不匹配后残留了最终文件或 .part 临时文件"
+        )
+
+        let missingChecksumDirectory = releaseFixtureDirectory.appendingPathComponent(
+            "missing-checksum",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: missingChecksumDirectory, withIntermediateDirectories: true)
+        ReleaseAssetURLProtocol.install { request in
+            let isChecksum = request.url?.lastPathComponent.hasSuffix(".sha256") == true
+            return ReleaseAssetURLProtocol.Fixture(
+                status: isChecksum ? 404 : 500,
+                headers: ["Content-Length": "0"],
+                body: Data()
+            )
+        }
+        do {
+            _ = try await fixtureDownloader.download(
+                check: cachedCheck,
+                downloadsDirectory: missingChecksumDirectory
+            )
+            throw VerificationError("缺少 checksum sidecar 时错误开始了内置下载")
+        } catch let error as AppReleaseDownloadError {
+            try expect(
+                error == .checksumUnavailable(statusCode: 404),
+                "缺少 checksum sidecar 返回了错误类型：\(error)"
+            )
+        }
+        let missingChecksumEntries = try fileManager.contentsOfDirectory(
+            at: missingChecksumDirectory,
+            includingPropertiesForKeys: nil
+        )
+        try expect(
+            missingChecksumEntries.isEmpty,
+            "缺少 checksum sidecar 时仍写入了下载文件"
+        )
+
+        let cancelledDirectory = releaseFixtureDirectory.appendingPathComponent(
+            "cancelled-before-start",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: cancelledDirectory, withIntermediateDirectories: true)
+        let cancellationBeforeStart = AppReleaseDownloadCancellation()
+        cancellationBeforeStart.cancel()
+        do {
+            _ = try await fixtureDownloader.download(
+                check: cachedCheck,
+                downloadsDirectory: cancelledDirectory,
+                cancellation: cancellationBeforeStart
+            )
+            throw VerificationError("已取消下载仍开始了网络或文件写入")
+        } catch is CancellationError {
+            // 预期：开始前取消不会创建 .part 或最终文件。
+        }
+        let cancelledEntries = try fileManager.contentsOfDirectory(
+            at: cancelledDirectory,
+            includingPropertiesForKeys: nil
+        )
+        try expect(cancelledEntries.isEmpty, "取消下载后残留了临时或最终文件")
+
+        let inFlightCancellationDirectory = releaseFixtureDirectory.appendingPathComponent(
+            "cancelled-in-flight",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: inFlightCancellationDirectory, withIntermediateDirectories: true)
+        let requestRecorder = ReleaseAssetRequestRecorder()
+        ReleaseAssetURLProtocol.install { request in
+            requestRecorder.record(request)
+            let isChecksum = request.url?.lastPathComponent.hasSuffix(".sha256") == true
+            let body = isChecksum ? fixtureSidecar : fixtureDMG
+            return ReleaseAssetURLProtocol.Fixture(
+                status: 200,
+                headers: ["Content-Length": "\(body.count)"],
+                body: body,
+                delay: isChecksum ? 0 : 0.5
+            )
+        }
+        let inFlightCancellation = AppReleaseDownloadCancellation()
+        let inFlightTask = Task {
+            try await fixtureDownloader.download(
+                check: cachedCheck,
+                downloadsDirectory: inFlightCancellationDirectory,
+                cancellation: inFlightCancellation
+            )
+        }
+        var dmGRequestStarted = false
+        for _ in 0 ..< 100 {
+            if requestRecorder.containsPath(suffix: "/\(filename)") {
+                dmGRequestStarted = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try expect(dmGRequestStarted, "受控下载没有在取消测试前进入 DMG 请求阶段")
+        inFlightCancellation.cancel()
+        do {
+            _ = try await inFlightTask.value
+            throw VerificationError("下载进行中取消后仍返回了成功结果")
+        } catch is CancellationError {
+            // 预期：取消会终止 URLSession 任务，并由下载器清理本次 .part 文件。
+        }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        let inFlightEntries = try fileManager.contentsOfDirectory(
+            at: inFlightCancellationDirectory,
+            includingPropertiesForKeys: nil
+        )
+        try expect(inFlightEntries.isEmpty, "下载进行中取消后残留了 .part 或最终文件")
     }
 
     private static func verifyNotificationPluginAndBridgeProtocol() throws {
@@ -914,6 +1390,10 @@ struct DSHDesktopVerification {
         try expect(
             oversized.panelHeight <= (700 - TerminalDockLayout.dividerHeight) * TerminalDockLayout.maximumFraction,
             "终端面板突破窗口 50% 高度上限"
+        )
+        try expect(
+            TerminalDockLayout.dividerHeight == 1,
+            "终端 dock 的可见分隔线必须保持为 1pt，避免割裂对话与终端"
         )
         try expect(TerminalDockLayout.maximumFraction == 0.5, "终端高度上限必须固定为可用窗口高度的 50%")
         try expect(

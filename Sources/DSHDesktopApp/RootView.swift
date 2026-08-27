@@ -8,9 +8,9 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            // 与 NSWindow 的首帧底色一致。这样 SwiftUI 尚未完成一次绘制时，
-            // 以及 WebView 尚未显示页面时，都不会留下默认白底。
-            Color(nsColor: .windowBackgroundColor)
+            // 与 NSWindow 和 WKWebView 的首帧底色一致。这样 SwiftUI 尚未完成一次
+            // 绘制、以及网页尚未产生真实主题色时，都不会留下默认白底。
+            Color(nsColor: AppLaunchSurface.color)
                 .ignoresSafeArea()
 
             Group {
@@ -266,25 +266,32 @@ private struct ReadyWebView: View {
 
     var body: some View {
         ZStack {
-            Color(nsColor: .windowBackgroundColor)
+            Color(nsColor: AppLaunchSurface.color)
 
             TerminalDockHost(
                 container: container,
-                terminalController: terminalController
+                terminalController: terminalController,
+                isPageLoading: container.isPageLoading
             )
-                .opacity(container.isPageLoading ? 0 : 1)
                 .allowsHitTesting(!container.isPageLoading)
 
             if container.isPageLoading {
-                VStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.large)
-                    Text("正在打开 DSH")
-                        .font(.headline)
-                    Text("正在加载本机网页…")
-                        .foregroundStyle(.secondary)
+                // 与原生 loading cover（加载遮罩）同时存在：SwiftUI 层负责可见的
+                // 进度反馈，原生层负责覆盖 NSViewRepresentable 首次挂载的极短窗口。
+                // 两层都不隐藏 WKWebView，因此它仍能完成导航和首帧绘制。
+                ZStack {
+                    Color(nsColor: AppLaunchSurface.color)
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text("正在打开 DSH")
+                            .font(.headline)
+                        Text("正在加载本机网页…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(28)
                 }
-                .padding(28)
+                .allowsHitTesting(false)
             }
         }
             .overlay(alignment: .bottomLeading) {

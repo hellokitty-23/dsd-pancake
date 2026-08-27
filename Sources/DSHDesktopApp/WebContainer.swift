@@ -38,6 +38,10 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private var notificationBridgeEnabled = false
     private var terminalBridgeEnabled = false
     private var terminalConversationReservation: CGFloat = 0
+    /// `didFinish` 只表示导航结束，不保证 DSH 的 CSS 与根布局已经完成首帧绘制。
+    /// 在收到 Chrome bridge 的有效视觉数据前持续保留启动层，避免 WebKit 白帧。
+    private var didFinishCurrentNavigation = false
+    private var presentationFallbackTask: Task<Void, Never>?
     private var chromeStyle: ChromeSurfaceStyle? {
         didSet {
             guard chromeStyle != oldValue else { return }
@@ -88,9 +92,9 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             )
         )
 
-        // WebKit 在首个页面提交前默认绘制纯白。先给它与原生窗口一致的底色，
-        // 再由 SwiftUI 的加载层遮住尚未完成的页面，避免启动时出现白屏闪烁。
-        webView.underPageBackgroundColor = .windowBackgroundColor
+        // WebKit 在首个页面提交前默认绘制纯白。先给它与原生窗口一致的深色底色，
+        // 再在页面完成真实首帧后揭示，避免启动时出现白屏闪烁。
+        webView.underPageBackgroundColor = AppLaunchSurface.color
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -133,15 +137,13 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     func loadLocalService() {
         var request = URLRequest(url: LocalService.url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        isPageLoading = true
-        resetChromeStyle()
+        beginPageLoad()
         webView.load(request)
         dismissNavigationMessage()
     }
 
     func reload() {
-        isPageLoading = true
-        resetChromeStyle()
+        beginPageLoad()
         webView.reload()
         dismissNavigationMessage()
     }
@@ -151,12 +153,13 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-        isPageLoading = true
-        resetChromeStyle()
+        beginPageLoad()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        isPageLoading = false
+        didFinishCurrentNavigation = true
+        revealPageAfterFirstPaintIfReady()
+        schedulePresentationFallback()
         publishTerminalConversationReservation()
     }
 
@@ -221,27 +224,70 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: Error) {
+        presentationFallbackTask?.cancel()
+        presentationFallbackTask = nil
         isPageLoading = false
         showPersistentNavigationMessage("页面加载失败：\(error.localizedDescription)", showsReloadAction: true)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
+        presentationFallbackTask?.cancel()
+        presentationFallbackTask = nil
         isPageLoading = false
         showPersistentNavigationMessage("页面加载中断：\(error.localizedDescription)", showsReloadAction: true)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        presentationFallbackTask?.cancel()
+        presentationFallbackTask = nil
         isPageLoading = false
         resetChromeStyle()
         showPersistentNavigationMessage("网页进程已结束；可使用“重新加载”恢复。", showsReloadAction: true)
     }
 
-    fileprivate func receiveChromeStyleMessage(_ body: Any) {
+    /// 仅由同模块的 WebKit Chrome handler 调用；解码失败不会改变原生样式。
+    func receiveChromeStyleMessage(_ body: Any) {
         guard let style = ChromeStyleBridge.decode(body) else { return }
         chromeStyle = style
+        revealPageAfterFirstPaintIfReady()
     }
 
-    fileprivate func receiveNotificationMessage(
+    private func beginPageLoad() {
+        presentationFallbackTask?.cancel()
+        presentationFallbackTask = nil
+        didFinishCurrentNavigation = false
+        isPageLoading = true
+        resetChromeStyle()
+    }
+
+    /// Chrome bridge 在 `requestAnimationFrame`（下一帧绘制前回调）中读取布局和颜色，
+    /// 收到有效数据即代表 DSH 已经拥有可展示的表面。此时再显示 WKWebView，可避免
+    /// `didFinish` 之后 CSS 或前端 hydration（客户端初始化）尚未完成的闪帧。
+    private func revealPageAfterFirstPaintIfReady() {
+        guard didFinishCurrentNavigation, chromeStyle != nil else { return }
+        presentationFallbackTask?.cancel()
+        presentationFallbackTask = nil
+        isPageLoading = false
+    }
+
+    /// 个别异常页面可能无法提供 Chrome bridge；保留有限后备，避免加载层永久停留。
+    /// 正常 DSH 启动由上面的 bridge 路径立即揭示，不会走此分支。
+    private func schedulePresentationFallback() {
+        guard isPageLoading, presentationFallbackTask == nil else { return }
+        presentationFallbackTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 600_000_000)
+            } catch {
+                return
+            }
+            guard let self, self.didFinishCurrentNavigation else { return }
+            self.presentationFallbackTask = nil
+            self.isPageLoading = false
+        }
+    }
+
+    /// 仅由同模块的 WebKit 通知 handler 调用；能力与 origin 准入保留在这里。
+    func receiveNotificationMessage(
         _ body: Any,
         frameInfo: WKFrameInfo
     ) async -> [String: Any]? {
@@ -254,7 +300,8 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         return await notificationCoordinator.handle(action)
     }
 
-    fileprivate func receiveTerminalMessage(
+    /// 仅由同模块的 WebKit 终端 handler 调用；严格 admission（准入）仍在这里完成。
+    func receiveTerminalMessage(
         _ body: Any,
         frameInfo: WKFrameInfo
     ) -> [String: Any]? {
@@ -351,272 +398,6 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         withAnimation(.easeOut(duration: 0.18)) {
             navigationMessage = message
         }
-    }
-}
-
-private final class ChromeStyleMessageHandler: NSObject, WKScriptMessageHandler {
-    weak var container: WebContainer?
-
-    init(container: WebContainer) {
-        self.container = container
-    }
-
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == ChromeStyleBridge.messageName else { return }
-        Task { @MainActor [weak container] in
-            container?.receiveChromeStyleMessage(message.body)
-        }
-    }
-}
-
-@MainActor
-private final class NotificationMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
-    weak var container: WebContainer?
-
-    init(container: WebContainer) {
-        self.container = container
-    }
-
-    func userContentController(
-        _ userContentController: WKUserContentController,
-        didReceive message: WKScriptMessage,
-        replyHandler: @escaping @MainActor (Any?, String?) -> Void
-    ) {
-        guard message.name == DesktopNotificationBridge.messageName else {
-            replyHandler(nil, "Unexpected script message name")
-            return
-        }
-
-        Task { @MainActor [weak container] in
-            guard let container else {
-                replyHandler(nil, "Notification bridge is unavailable")
-                return
-            }
-            replyHandler(await container.receiveNotificationMessage(message.body, frameInfo: message.frameInfo), nil)
-        }
-    }
-}
-
-@MainActor
-private final class TerminalMessageHandler: NSObject, WKScriptMessageHandlerWithReply {
-    weak var container: WebContainer?
-
-    init(container: WebContainer) {
-        self.container = container
-    }
-
-    func userContentController(
-        _ userContentController: WKUserContentController,
-        didReceive message: WKScriptMessage,
-        replyHandler: @escaping @MainActor (Any?, String?) -> Void
-    ) {
-        guard message.name == DesktopTerminalBridge.messageName else {
-            replyHandler(nil, "Unexpected script message name")
-            return
-        }
-        guard let container else {
-            replyHandler(nil, "Terminal bridge is unavailable")
-            return
-        }
-        replyHandler(container.receiveTerminalMessage(message.body, frameInfo: message.frameInfo), nil)
-    }
-}
-
-private enum ChromeStyleBridge {
-    static let messageName = "dshDesktopChromeStyle"
-
-    /// 只读取 DSH 页面根布局的几何和已计算的表面色。它不读取文字、会话、Cookie，
-    /// 不写入 DOM，也不拦截键鼠或修改 DSH 功能。
-    static let script = #"""
-    (() => {
-      "use strict";
-      const bridgeName = "dshDesktopChromeStyle";
-      if (window.__dshDesktopChromeStyleBridgeInstalled) return;
-      Object.defineProperty(window, "__dshDesktopChromeStyleBridgeInstalled", {
-        value: true,
-        configurable: false,
-        writable: false,
-      });
-
-      const messageHandler = window.webkit && window.webkit.messageHandlers
-        ? window.webkit.messageHandlers[bridgeName]
-        : null;
-      if (!messageHandler || typeof messageHandler.postMessage !== "function") return;
-
-      const finite = (value) => Number.isFinite(value);
-      const colorPattern = /^rgba?\(\s*([0-9.]+)[,\s]+([0-9.]+)[,\s]+([0-9.]+)(?:[,\s/]+([0-9.]+))?\s*\)$/i;
-
-      const parseColor = (value) => {
-        const match = colorPattern.exec(value || "");
-        if (!match) return null;
-        const red = Number(match[1]);
-        const green = Number(match[2]);
-        const blue = Number(match[3]);
-        const alpha = match[4] === undefined ? 1 : Number(match[4]);
-        if (![red, green, blue, alpha].every(finite)) return null;
-        if (red < 0 || red > 255 || green < 0 || green > 255 || blue < 0 || blue > 255 || alpha < 0 || alpha > 1) return null;
-        return { red, green, blue, alpha };
-      };
-
-      const opaqueBackground = (element, fallback) => {
-        for (let node = element; node instanceof Element; node = node.parentElement) {
-          const color = parseColor(getComputedStyle(node).backgroundColor);
-          if (color && color.alpha > 0.01) return color;
-        }
-        return fallback;
-      };
-
-      const findFrame = () => {
-        const root = document.getElementById("root") || document.body;
-        if (!root) return null;
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        // 兼容 DSH 将根节点本身设为网格，或在根节点下再包一层的两种实现。
-        for (const candidate of [root, ...root.querySelectorAll("*")]) {
-          const rect = candidate.getBoundingClientRect();
-          if (rect.left > 1 || rect.top > 1 || rect.width < viewportWidth - 2 || rect.height < viewportHeight - 2) continue;
-          const style = getComputedStyle(candidate);
-          if (style.display !== "grid") continue;
-          if (candidate.children.length < 2) continue;
-          const sidebar = candidate.children[0];
-          const sidebarRect = sidebar.getBoundingClientRect();
-          if (sidebarRect.left > 1 || sidebarRect.width <= 0 || sidebarRect.width >= viewportWidth * 0.75) continue;
-          return { frame: candidate, sidebar };
-        }
-        return null;
-      };
-
-      let observedFrame = null;
-      let observedSidebar = null;
-      let lastSerialized = "";
-      let scheduled = false;
-      const resizeObserver = new ResizeObserver(() => schedule());
-
-      const cachedLayout = () => {
-        if (!observedFrame || !observedSidebar) return null;
-        if (!observedFrame.isConnected || !observedSidebar.isConnected) return null;
-        if (observedSidebar.parentElement !== observedFrame) return null;
-        return { frame: observedFrame, sidebar: observedSidebar };
-      };
-
-      const invalidateLayout = () => {
-        resizeObserver.disconnect();
-        observedFrame = null;
-        observedSidebar = null;
-        lastSerialized = "";
-        schedule();
-      };
-
-      const publish = () => {
-        scheduled = false;
-        // 首次或根布局替换时才遍历页面。侧栏拖动会触发 ResizeObserver，
-        // 后续帧直接复用这两个节点，避免长会话 DOM 在拖动时被反复扫描。
-        const layout = cachedLayout() || findFrame();
-        if (!layout) return;
-
-        if (layout.frame !== observedFrame || layout.sidebar !== observedSidebar) {
-          resizeObserver.disconnect();
-          resizeObserver.observe(layout.frame);
-          resizeObserver.observe(layout.sidebar);
-          observedFrame = layout.frame;
-          observedSidebar = layout.sidebar;
-        }
-
-        const sidebarRect = layout.sidebar.getBoundingClientRect();
-        const main = opaqueBackground(layout.frame, null);
-        const sidebar = opaqueBackground(layout.sidebar, null);
-        const divider = parseColor(getComputedStyle(layout.sidebar).borderRightColor);
-        if (!main || !sidebar || !divider || !finite(sidebarRect.width)) return;
-
-        const snapshot = {
-          sidebarWidth: Math.max(0, Math.min(window.innerWidth, sidebarRect.width)),
-          sidebar,
-          main,
-          divider,
-        };
-        const serialized = JSON.stringify(snapshot);
-        if (serialized === lastSerialized) return;
-        lastSerialized = serialized;
-        messageHandler.postMessage(snapshot);
-      };
-
-      const schedule = () => {
-        if (scheduled) return;
-        scheduled = true;
-        window.requestAnimationFrame(publish);
-      };
-
-      const root = document.getElementById("root");
-      if (root) {
-        new MutationObserver(invalidateLayout).observe(root, { childList: true });
-      }
-      new MutationObserver(schedule).observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ["class", "style", "data-theme"],
-      });
-      if (document.body) {
-        new MutationObserver(schedule).observe(document.body, {
-          attributes: true,
-          attributeFilter: ["class", "style", "data-ds-dark-theme"],
-        });
-      }
-      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", schedule);
-
-      let attempts = 0;
-      const bootstrap = () => {
-        schedule();
-        if (observedFrame || attempts >= 120) return;
-        attempts += 1;
-        window.setTimeout(bootstrap, 250);
-      };
-      bootstrap();
-    })();
-    """#
-
-    static func decode(_ body: Any) -> ChromeSurfaceStyle? {
-        guard let dictionary = body as? [String: Any],
-              let sidebarWidth = finiteNumber(dictionary["sidebarWidth"]),
-              let sidebarColor = color(dictionary["sidebar"]),
-              let mainColor = color(dictionary["main"]),
-              let dividerColor = color(dictionary["divider"]),
-              sidebarWidth >= 0,
-              sidebarWidth <= 20_000 else {
-            return nil
-        }
-        return ChromeSurfaceStyle(
-            sidebarWidth: sidebarWidth,
-            sidebarColor: sidebarColor,
-            mainColor: mainColor,
-            dividerColor: dividerColor
-        )
-    }
-
-    private static func color(_ value: Any?) -> ChromeSurfaceStyle.RGBA? {
-        guard let dictionary = value as? [String: Any],
-              let red = finiteNumber(dictionary["red"]),
-              let green = finiteNumber(dictionary["green"]),
-              let blue = finiteNumber(dictionary["blue"]),
-              let alpha = finiteNumber(dictionary["alpha"]),
-              (0 ... 255).contains(red),
-              (0 ... 255).contains(green),
-              (0 ... 255).contains(blue),
-              (0 ... 1).contains(alpha) else {
-            return nil
-        }
-        return ChromeSurfaceStyle.RGBA(
-            red: red / 255,
-            green: green / 255,
-            blue: blue / 255,
-            alpha: alpha
-        )
-    }
-
-    private static func finiteNumber(_ value: Any?) -> CGFloat? {
-        guard let number = value as? NSNumber,
-              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-        let result = number.doubleValue
-        guard result.isFinite else { return nil }
-        return CGFloat(result)
     }
 }
 

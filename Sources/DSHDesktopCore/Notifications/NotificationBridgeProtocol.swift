@@ -8,7 +8,7 @@ public enum DesktopNotificationBridge {
     /// 严格解析来自 WebKit 的 JSON 形对象。未知字段一律拒绝，避免桥接口在未来被悄然扩大。
     public static func decode(_ body: Any) -> DesktopNotificationBridgeAction? {
         guard let dictionary = body as? [String: Any],
-              integer(dictionary["version"]) == protocolVersion,
+              BridgePayloadValidation.integer(dictionary["version"]) == protocolVersion,
               let action = dictionary["action"] as? String else {
             return nil
         }
@@ -35,21 +35,6 @@ public enum DesktopNotificationBridge {
         default:
             return nil
         }
-    }
-
-    private static func integer(_ value: Any?) -> Int? {
-        guard let number = value as? NSNumber,
-              CFGetTypeID(number) != CFBooleanGetTypeID() else {
-            return nil
-        }
-        let doubleValue = number.doubleValue
-        guard doubleValue.isFinite,
-              doubleValue.rounded(.towardZero) == doubleValue,
-              doubleValue >= Double(Int.min),
-              doubleValue <= Double(Int.max) else {
-            return nil
-        }
-        return Int(doubleValue)
     }
 }
 
@@ -82,23 +67,9 @@ public struct DesktopNotificationEvent: Equatable, Sendable {
     public let kind: DesktopNotificationKind
 
     public init?(eventID: String, kind: DesktopNotificationKind) {
-        guard Self.isOpaqueEventID(eventID) else { return nil }
+        guard BridgePayloadValidation.isOpaqueIdentifier(eventID) else { return nil }
         self.eventID = eventID
         self.kind = kind
-    }
-
-    /// DSH 的 UUID/修订号组合即可满足这个格式；不接受自由文本，从源头缩小隐私面。
-    private static func isOpaqueEventID(_ value: String) -> Bool {
-        let bytes = Array(value.utf8)
-        guard !bytes.isEmpty, bytes.count <= 192 else { return false }
-        return bytes.allSatisfy { byte in
-            switch byte {
-            case 48 ... 57, 65 ... 90, 97 ... 122, 45, 46, 58, 95:
-                true
-            default:
-                false
-            }
-        }
     }
 }
 

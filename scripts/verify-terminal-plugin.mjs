@@ -83,10 +83,11 @@ let injectedSlot
 let registration
 let snapshot = {
   current: "session-42",
-  ids: ["session-42"],
-  byId: {
-    "session-42": { id: "session-42", cwd: "/tmp/dsd-pancake-workspace" },
-  },
+  // DSH 0.1.1-rc.2 的公开 sessions.list snapshot：current 配合 items，
+  // 每项使用 sessionId。此形态必须能令原生终端入口获得当前工作区。
+  items: [
+    { sessionId: "session-42", cwd: "/tmp/dsd-pancake-workspace" },
+  ],
 }
 let sessionReads = 0
 let subscriber
@@ -158,11 +159,10 @@ expect(registration?.component({}) === null, "收起原生 dock 后终端布局�
 
 snapshot = {
   current: "session-99",
-  ids: ["session-42", "session-99"],
-  byId: {
-    "session-42": { id: "session-42", cwd: "/tmp/dsd-pancake-workspace" },
-    "session-99": { id: "session-99", cwd: "/tmp/dsd-pancake-new-workspace" },
-  },
+  items: [
+    { sessionId: "session-42", cwd: "/tmp/dsd-pancake-workspace" },
+    { sessionId: "session-99", cwd: "/tmp/dsd-pancake-new-workspace" },
+  ],
 }
 subscriber?.()
 await settle()
@@ -177,13 +177,35 @@ expect(
   "切换当前 session 时没有只同步新的 current workspace",
 )
 
-snapshot = { current: undefined, ids: ["session-42"], byId: { "session-42": { id: "session-42" } } }
+snapshot = { current: undefined, items: [{ sessionId: "session-42" }] }
 subscriber?.()
 await settle()
 const clear = sent.find((payload) => payload.action === "clearWorkspace")
 expect(
   JSON.stringify(clear) === JSON.stringify({ version: 1, action: "clearWorkspace" }),
   "没有 workspace 时没有精确撤销原生终端入口",
+)
+
+// 对旧版公开快照仍保持只读兼容：用 byId 索引时也必须精确同步 current，而不能
+// 因 DSH 版本差异让壳层按钮永久保持禁用。
+snapshot = {
+  current: "legacy-session",
+  ids: ["legacy-session"],
+  byId: {
+    "legacy-session": { id: "legacy-session", cwd: "/tmp/dsd-pancake-legacy-workspace" },
+  },
+}
+subscriber?.()
+await settle()
+const legacySync = sent.filter((payload) => payload.action === "syncWorkspace").at(-1)
+expect(
+  JSON.stringify(legacySync) === JSON.stringify({
+    version: 1,
+    action: "syncWorkspace",
+    sessionID: "legacy-session",
+    workspacePath: "/tmp/dsd-pancake-legacy-workspace",
+  }),
+  "旧版 byId session snapshot 没有兼容同步 current workspace",
 )
 expect(!sent.some((payload) => ["show", "hide", "toggle"].includes(payload.action)), "DSH 插件越权请求了原生面板显示状态")
 pluginCleanup?.()

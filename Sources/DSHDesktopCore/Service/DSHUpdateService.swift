@@ -226,12 +226,13 @@ public struct DSHUpdateService: Sendable {
 
     public init() {}
 
-    public func check(
+    /// 只读取指定可执行文件的版本。自动检查恢复缓存时用它确认“仍是同一份 DSH”，
+    /// 不会查询 npm、写入全局安装或修改任何进程。
+    public func currentVersion(
         executable: DSHExecutable,
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        fileManager: FileManager = .default
-    ) async throws -> DSHUpdateCheck {
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) async throws -> SemanticVersion {
         let currentOutput = try await runner.run(
             executable: executable.url,
             arguments: ["--version"],
@@ -248,6 +249,39 @@ public struct DSHUpdateService: Sendable {
                 output: bounded(currentOutput.stdout)
             )
         }
+        return currentVersion
+    }
+
+    public func check(
+        executable: DSHExecutable,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) async throws -> DSHUpdateCheck {
+        let currentVersion = try await currentVersion(
+            executable: executable,
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory
+        )
+        return try await check(
+            executable: executable,
+            currentVersion: currentVersion,
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )
+    }
+
+    /// 在调用方已经为缓存失效读取过 `dsh --version` 时复用该结果，避免同一次只读
+    /// 检查重复启动受控子进程。这个重载仍只会定位 npm 与读取 `dist-tags.latest`，
+    /// 不会执行安装参数。
+    public func check(
+        executable: DSHExecutable,
+        currentVersion: SemanticVersion,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) async throws -> DSHUpdateCheck {
 
         let installation = try await locateNPMInstallation(
             for: executable.url,

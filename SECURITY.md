@@ -10,12 +10,16 @@ DSD Pancake 会启动用户明确安装的本机 `dsh`，并把本机网页放�
 - 外部链接或非本机页面可能绕过导航边界。
 - terminal bridge（终端通信桥）可能接受命令、脚本、非预期字段或非本机／非主 frame（主页面）消息；
 - App 创建的 PTY（伪终端）或其子进程在关闭终端、失去 DSH ownership（进程归属）或 App 退出后遗留。
+- 自动更新检查可能在未获用户点击时下载、安装、替换或启动文件；
+- App 更新下载可能接受非固定 Release、非受信任重定向、错误 SHA-256 sidecar（校验文件），或覆盖既有 Downloads 文件。
 
 仓库启用 GitHub Private Security Advisories（私密安全通报）后，请优先通过仓库的 **Security** 页面提交报告。若该入口尚未启用，只提交最小可复现描述，并要求维护者提供私下沟通渠道。
 
 本项目不处理 DSH、Node.js 或第三方插件自身的安全漏洞；这些问题应报告给相应上游项目。
 
-DSD Pancake 自身的更新检查只向固定公开仓库的 GitHub `/releases/latest` 页面发送 `HEAD`（仅响应头）请求，不调用需要未登录速率额度的 REST API；它验证最终重定向的项目路径和稳定 SemVer 标签，再生成同一标签下固定命名的 arm64 DMG 地址。它不会下载、解包、安装、替换或重启 App；若返回地址离开固定 GitHub 项目路径，结果会被拒绝。
+DSD Pancake 自身的更新检查以 App 与 DSH 两个独立来源每小时静默执行一次，并只保存最近检查时间及最小版本缓存；它不弹窗、不下载、不安装。App 检查只向固定公开仓库的 GitHub `/releases/latest` 页面发送 `HEAD`（仅响应头）请求，使用无 Cookie、无凭据缓存的临时会话，不调用需要未登录速率额度的 REST API；它验证最终重定向的项目路径和稳定 SemVer 标签，再生成同一标签下固定命名的 arm64 DMG 与 `.sha256` sidecar 地址。状态只显示在 App 原生标题栏和原生 Popover，不注入 DSH 网页。
+
+用户打开原生 Popover 后，App 只读取格式严格的单行 sidecar（`<64 位 hash><空白><精确 DMG 文件名>`）；sidecar 缺失／错误时界面只提供发布页。只有 sidecar 已验证、用户再点击“下载更新”后，App 才会下载 DMG。下载器只允许固定 GitHub 初始 URL 以及明确的 GitHub Release 资产跳转主机；文件只先写入本次创建的 `.part` 临时路径，流式 SHA-256（安全散列算法）匹配后才移动到 Downloads（下载）目录。它不会覆盖既有文件，取消、跳转异常或哈希不匹配时只移除本次临时文件，并且不会自动打开、挂载、安装、替换或重启 App。SHA-256 sidecar 只能验证与发布者公布的摘要一致，不能替代 Developer ID（开发者身份）签名、hardened runtime（强化运行时）或 Apple notarization（公证）。
 
 底部终端只在本 App 创建且已验证归属的 DSH，并且本次私有 terminal patch（覆盖层）已准备时启用。其 WebKit reply bridge（可回复通信桥）要求 `127.0.0.1:3080` 的主 frame、版本 `1` 和精确字段集；只允许 capability（能力）查询、已验证 workspace 路径同步，以及精确的“当前无工作区”状态。显示／收起仅由 App 原生标题栏、菜单或快捷键发起，网页不能请求。协议没有 command、脚本、`eval`、环境变量或进程参数字段，任何未知 action（动作）或额外字段均拒绝。为了让右侧对话避开原生 dock，App 还会向当前页面单向发送版本化的布尔开关与已钳制高度；它不经过 reply bridge，客户端只在正式 composer footer slot 中把它渲染为不可交互空白，网页伪造该事件也无法显示／收起终端、执行命令或读取本机数据。普通浏览器和 external（外部已有）DSH 没有 bridge，因此终端插件安全 no-op（无操作）。同一 workspace 的每个终端标签都有独立 PTY 和 process group（进程组）；原生层不把终端输入、输出、环境变量或路径写入日志，也不把它们回传网页；关闭终端标签、终端内 shell 正常退出、App 退出或 ownership 丢失时会按对应 PTY process group 清理。
 

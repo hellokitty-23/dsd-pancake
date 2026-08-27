@@ -28,6 +28,7 @@ xcuserdata/
 /.claude/
 /private/
 /.playwright-cli/
+/.impeccable.md
 
 # App-private DSH notification plugin development artifacts
 /Plugins/**/node_modules/

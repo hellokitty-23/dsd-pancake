@@ -34,10 +34,18 @@ window.__ModuleLoader__.load({
 
     const currentWorkspace = (sessions) => {
       const snapshot = sessions.list.getSnapshot()
-      if (!isRecord(snapshot) || typeof snapshot.current !== "string" || !isRecord(snapshot.byId)) {
+      if (!isRecord(snapshot) || typeof snapshot.current !== "string") {
         return undefined
       }
-      const summary = snapshot.byId[snapshot.current]
+
+      // DSH 0.1.1-rc.2 将公开会话摘要从 `byId` 索引改为 `items` 数组；保留
+      // 旧索引回退以兼容仍提供该稳定 public shape 的版本。两种路径都只读取
+      // current 对应的一条摘要，不扫描历史会话或网页 DOM。
+      const summary = Array.isArray(snapshot.items)
+        ? snapshot.items.find((item) => isRecord(item) && item.sessionId === snapshot.current)
+        : isRecord(snapshot.byId)
+          ? snapshot.byId[snapshot.current]
+          : undefined
       if (!isRecord(summary) || typeof summary.cwd !== "string" || summary.cwd.length === 0) {
         return undefined
       }

@@ -18,6 +18,12 @@ struct ChromeSurfaceStyle: Equatable {
     let sidebarColor: RGBA
     let mainColor: RGBA
     let dividerColor: RGBA
+
+    /// 仅供原生壳层复用的右侧主画布色。它来自现有的只读 chrome bridge（视觉桥），
+    /// 不增加网页读取范围，也不携带会话、路径或任何业务数据。
+    var mainSurfaceColor: NSColor {
+        mainColor.nsColor
+    }
 }
 
 /// 全尺寸原生背景只负责标题栏区域。SwiftUI 内容仍固定在
@@ -117,7 +123,7 @@ private final class WindowChromeBackdropView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds
-        NSColor.windowBackgroundColor.setFill()
+        AppLaunchSurface.color.setFill()
         bounds.fill()
 
         guard let style, bounds.width > 0 else { return }
@@ -125,19 +131,23 @@ private final class WindowChromeBackdropView: NSView {
         style.mainColor.nsColor.setFill()
         bounds.fill()
 
+        // 左侧栏不能从标题栏下方才开始，否则在红绿灯右侧会形成一条横向“壳子”
+        // 与侧栏竖边相交的台阶。这里让侧栏表面和它的 1 physical pixel（物理像素）
+        // 分隔线贯穿原生标题栏；网页内容区则从安全内容区域开始，两者在同一条竖线
+        // 上无缝相接。不会额外绘制横向分层线。
         let sidebarWidth = min(max(style.sidebarWidth, 0), bounds.width)
         guard sidebarWidth > 0 else { return }
 
         style.sidebarColor.nsColor.setFill()
-        NSRect(x: 0, y: 0, width: sidebarWidth, height: bounds.height).fill()
+        NSRect(x: bounds.minX, y: bounds.minY, width: sidebarWidth, height: bounds.height).fill()
 
         guard sidebarWidth < bounds.width else { return }
         let scale = window?.backingScaleFactor ?? 1
         let dividerWidth = 1 / scale
         style.dividerColor.nsColor.setFill()
         NSRect(
-            x: max(0, sidebarWidth - dividerWidth),
-            y: 0,
+            x: bounds.minX + sidebarWidth - dividerWidth,
+            y: bounds.minY,
             width: dividerWidth,
             height: bounds.height
         ).fill()

@@ -6,9 +6,10 @@ public struct TerminalDockLayout: Equatable, Sendable {
     public static let defaultPanelHeight: CGFloat = WorkspaceTerminalState.defaultPanelHeight
     public static let minimumPanelHeight: CGFloat = 160
     /// 终端面板最多占可用原生内容高度的一半。分隔线单独计算，不把它伪装成
-    /// terminal 内容高度的一部分。
+    /// terminal 内容高度的一部分。可见线固定为 1pt；更宽的拖拽命中区仅在 AppKit
+    /// 容器内实现，避免为了可操作性把视觉边界做粗。
     public static let maximumFraction: CGFloat = 0.50
-    public static let dividerHeight: CGFloat = 5
+    public static let dividerHeight: CGFloat = 1
     /// 网页尚未报告侧栏宽度时的保守起点。宁可暂时在主内容区留下空隙，也不覆盖
     /// 左侧工程栏；首个 Chrome surface（表面）快照到达后会立刻使用精确宽度。
     public static let fallbackSidebarWidth: CGFloat = 384

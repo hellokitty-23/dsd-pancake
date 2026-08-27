@@ -91,8 +91,17 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var windowChrome: WindowChromeContainer?
-    private weak var terminalTitlebarButton: NSButton?
-    private var terminalTitlebarAccessory: NSTitlebarAccessoryViewController?
+    /// 由 AppDelegate 挂接原生 Popover；DSH 页面和私有插件都不会接触这个入口。
+    var onUpdateIndicatorPressed: ((NSView) -> Void)?
+    /// 标题栏只负责原生控件的展示和点击回调；进程、更新和终端状态仍由本协调器持有。
+    private lazy var titlebarControls = AppTitlebarControls(
+        onUpdatePressed: { [weak self] control in
+            self?.onUpdateIndicatorPressed?(control)
+        },
+        onTerminalToggle: { [weak self] in
+            self?.toggleTerminalPanel()
+        }
+    )
     private var currentHandle: SpawnHandle?
     private var operationGeneration: UInt64 = 0
     private var startupTask: Task<Void, Never>?
@@ -141,7 +150,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         self.preferences = preferences
         super.init()
         terminalController.onStateChange = { [weak self] _, _ in
-            self?.updateTerminalTitlebarControl()
+            self?.refreshTerminalTitlebarControl()
         }
         terminalController.onConversationReservationChange = { [weak self] height in
             self?.webContainer?.setTerminalConversationReservation(height)
@@ -165,12 +174,14 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.toolbar = nil
-        // 在网页尚未报告当前主题前，仍由系统动态窗口底色兜底，避免白色首帧。
-        window.backgroundColor = .windowBackgroundColor
+        // 在网页尚未报告当前主题前，用与 DSH 深色画布接近的中性底色兜底。
+        // 不能使用 `.windowBackgroundColor`：即使最终页面为深色，WebKit 也可能在
+        // 首帧按系统默认白色绘制，造成启动时闪白。
+        window.backgroundColor = AppLaunchSurface.color
         window.isOpaque = true
         window.contentView = chrome
         chrome.install(hostingView: content, safeAreaLayoutGuide: chrome.safeAreaLayoutGuide)
-        installTerminalTitlebarControl(in: window)
+        titlebarControls.install(in: window)
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("DSHDesktopMainWindow")
@@ -179,8 +190,20 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
         self.window = window
         self.windowChrome = chrome
-        updateTerminalTitlebarControl()
+        refreshTerminalTitlebarControl()
         restoreMainWindow()
+    }
+
+    func setUpdateAvailability(_ availability: UpdateAvailability) {
+        titlebarControls.setUpdateAvailability(availability)
+    }
+
+    func recordManualUpdateCheckResult() {
+        titlebarControls.recordManualUpdateCheckResult()
+    }
+
+    func presentAvailableUpdatesFromMenu() {
+        titlebarControls.presentAvailableUpdatesFromMenu()
     }
 
     func beginStartup() {
@@ -424,10 +447,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     func toggleTerminalPanel() {
         terminalController.toggleFromMenu()
-    }
-
-    @objc private func toggleTerminalPanelFromTitlebar(_ sender: Any?) {
-        toggleTerminalPanel()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -677,6 +696,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         container.onChromeStyleChange = { [weak self] style in
             self?.windowChrome?.apply(style: style)
             self?.terminalController.setSidebarWidth(style?.sidebarWidth)
+            self?.terminalController.setMainSurfaceColor(style?.mainSurfaceColor)
         }
         webContainer = container
         container.loadLocalService()
@@ -1038,51 +1058,14 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         terminalBridgeEnabled = enabled
         webContainer?.setTerminalBridgeEnabled(enabled)
         terminalController.setBridgeEnabled(enabled)
-        updateTerminalTitlebarControl()
+        refreshTerminalTitlebarControl()
     }
 
-    /// 终端按钮属于 AppKit 壳层，而不是 DSH 页面。它沿用原生标题栏右侧 accessory
-    /// 布局，因此不会随 DSH header 重绘、主题或插件插槽变化而移动。
-    private func installTerminalTitlebarControl(in window: NSWindow) {
-        let label = "显示/隐藏底部终端 ⌘J"
-        let button = NSButton(frame: NSRect(x: 4, y: 2, width: 28, height: 24))
-        button.setButtonType(.toggle)
-        button.bezelStyle = .toolbar
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
-        button.image = NSImage(
-            systemSymbolName: "terminal",
-            accessibilityDescription: label
-        )?.withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
-        button.target = self
-        button.action = #selector(toggleTerminalPanelFromTitlebar(_:))
-        button.toolTip = label
-        button.setAccessibilityLabel(label)
-
-        // `.right` accessory 的容器仍贴着标题栏右缘；保留约 20pt 的右侧留白，使
-        // 图标落在窗口圆角内侧而非贴边，同时不影响原生点击区域或快捷键。
-        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 52, height: 28))
-        holder.addSubview(button)
-
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.layoutAttribute = .right
-        accessory.view = holder
-        window.addTitlebarAccessoryViewController(accessory)
-        terminalTitlebarAccessory = accessory
-        terminalTitlebarButton = button
-    }
-
-    private func updateTerminalTitlebarControl() {
-        guard let button = terminalTitlebarButton else { return }
-        let enabled = terminalController.canToggleFromMenu
-        let isOpen = terminalController.isPanelVisible
-        button.isEnabled = enabled
-        button.state = isOpen ? .on : .off
-        button.contentTintColor = isOpen ? .controlAccentColor : .secondaryLabelColor
-        button.toolTip = enabled
-            ? "显示/隐藏底部终端 ⌘J"
-            : "当前会话没有有效工作区，暂时无法打开底部终端"
-        button.setAccessibilityValue(isOpen ? "已显示" : "已隐藏")
+    private func refreshTerminalTitlebarControl() {
+        titlebarControls.updateTerminalState(
+            canToggle: terminalController.canToggleFromMenu,
+            isVisible: terminalController.isPanelVisible
+        )
     }
 
     /// 覆盖层只要让 DSH 在页面就绪前失败一次，就退回标准启动命令。此路径没有
