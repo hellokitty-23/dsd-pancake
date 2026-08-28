@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "requiredFiles": [
+    "package.json",
+    "cordis.patch.yml",
+    "lib/index.js",
+    "lib/client.js"
+  ],
+  "plugins": [
+    {
+      "id": "notifications",
+      "label": "提醒插件",
+      "sourceDirectory": "Plugins/dsd-pancake-notifications",
+      "resourceDirectory": "DSHNotifications",
+      "packageName": "@dsd-pancake/dsh-desktop-notifications",
+      "patchId": "dsd-pancake-notifications",
+      "inject": ["sessions"],
+      "swiftKind": "notification",
+      "swiftType": "DSHNotificationPlugin",
+      "swiftSource": "Sources/DSHDesktopCore/Service/DSHNotificationPlugin.swift",
+      "verifier": "scripts/verify-notification-plugin.mjs"
+    },
+    {
+      "id": "terminal",
+      "label": "终端插件",
+      "sourceDirectory": "Plugins/dsd-pancake-terminal",
+      "resourceDirectory": "DSHTerminal",
+      "packageName": "@dsd-pancake/dsh-desktop-terminal",
+      "patchId": "dsd-pancake-terminal",
+      "inject": ["sessions", "slots"],
+      "swiftKind": "terminal",
+      "swiftType": "DSHTerminalPlugin",
+      "swiftSource": "Sources/DSHDesktopCore/Service/DSHTerminalPlugin.swift",
+      "verifier": "scripts/verify-terminal-plugin.mjs"
+    },
+    {
+      "id": "operation-folding",
+      "label": "操作折叠插件",
+      "sourceDirectory": "Plugins/dsd-pancake-operation-folding",
+      "resourceDirectory": "DSHOperationFolding",
+      "packageName": "@dsd-pancake/dsh-desktop-operation-folding",
+      "patchId": "dsd-pancake-operation-folding",
+      "inject": ["slots"],
+      "swiftKind": "operationFolding",
+      "swiftType": "DSHOperationFoldingPlugin",
+      "swiftSource": "Sources/DSHDesktopCore/Service/DSHOperationFoldingPlugin.swift",
+      "verifier": "scripts/verify-operation-folding-plugin.mjs"
+    },
+    {
+      "id": "shortcuts",
+      "label": "快捷键插件",
+      "sourceDirectory": "Plugins/dsd-pancake-shortcuts",
+      "resourceDirectory": "DSHShortcuts",
+      "packageName": "@dsd-pancake/dsh-desktop-shortcuts",
+      "patchId": "dsd-pancake-shortcuts",
+      "inject": ["sessions", "slots"],
+      "swiftKind": "shortcut",
+      "swiftType": "DSHShortcutPlugin",
+      "swiftSource": "Sources/DSHDesktopCore/Service/DSHShortcutPlugin.swift",
+      "verifier": "scripts/verify-shortcut-plugin.mjs"
+    }
+  ]
+}

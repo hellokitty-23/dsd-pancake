@@ -49,6 +49,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         case launchFailed(String)
         case readinessTimedOut
         case portConflict
+        case listenerLost
         case ownershipLost
         case serviceStopped
         case drainingCleanup
@@ -64,12 +65,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     @Published private(set) var logEntries: [LogEntry] = []
     @Published private(set) var quitConfirmation: QuitConfirmation?
 
-    private let bundleIdentifier: String
     private let instanceLock: SingleInstanceLock
-    private let probe = ServiceProbe()
-    private let locator = DSHLocator()
     private let preferences: UserPreferences
-    private let supervisor = ProcessSupervisor()
+    private let serviceSession = ServiceSessionController()
+    private let privatePluginController = PrivatePluginController()
     private lazy var notificationCoordinator = NotificationCoordinator(
         shouldDeliver: { [weak self] in
             guard let self else { return false }
@@ -91,7 +90,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var windowChrome: WindowChromeContainer?
-    /// 由 AppDelegate 挂接原生 Popover；DSH 页面和私有插件都不会接触这个入口。
+    /// 由 AppDelegate 挂接原生更新浮层；DSH 页面和私有插件都不会接触这个入口。
     var onUpdateIndicatorPressed: ((NSView) -> Void)?
     /// 标题栏只负责原生控件的展示和点击回调；进程、更新和终端状态仍由本协调器持有。
     private lazy var titlebarControls = AppTitlebarControls(
@@ -102,36 +101,32 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             self?.toggleTerminalPanel()
         }
     )
-    private var currentHandle: SpawnHandle?
-    private var operationGeneration: UInt64 = 0
+    private var currentHandle: SpawnHandle? { serviceSession.currentHandle }
+    private var operationGeneration: UInt64 { serviceSession.generation }
     private var startupTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
+    /// generation（启动代次）切换恰好落在 `spawn` 返回边界时，旧子进程仍须
+    /// 完成一次身份复核、正常 SIGTERM 和双 pipe 排空。该任务不受旧 startupTask
+    /// 的取消状态影响，也不会使用强制信号或猜测 PID。
+    private var staleSpawnCleanupTask: Task<Void, Never>?
     private var quitTask: Task<Void, Never>?
     private var terminationGate: TerminationGateSnapshot = .clear
     private var quitPending = false
     private var terminationTransactions = TerminationTransactionRegistry()
     private var terminationConfirmation = TerminationConfirmationGate()
     private var pendingQuitConfirmation: PendingQuitConfirmation?
+    /// 第二次 `⌘Q` 只有在 App 自己的 PTY 已全部收敛后才进入 DSH 清理。
+    /// spawn 可能跨越这个 await 边界，因此用事务 ID 记录“第二击已确认且
+    /// terminal 已完成”，让迟到的 spawn 结果继续同一条退出路径。
+    private var confirmedTerminationReadyID: UInt64?
     private var stopConfirmationAutoCancelTask: Task<Void, Never>?
     private var presentationBeforeTermination: Presentation?
     private var reconciledExitedHandle: SpawnHandle?
     private var reachableServiceAfterExitHandle: SpawnHandle?
     private var readinessDeadline: ReadinessDeadline?
     private var lastObservedExit: (handle: SpawnHandle, status: ProcessExitStatus)?
-    /// 只有本次 App 用 `--patch` 创建并仍保持 owned 语义的 DSH，才获得原生通知桥。
-    /// 已存在或后继 external 服务即使显示在 WebView 中，也不能请求 App 通知。
-    private var notificationBridgeEnabled = false
-    /// 终端 bridge 必须比通知更严格：仅在私有 terminal patch 已随本次 owned DSH
-    /// 启动，并且 listener 归属复核通过后才可能为 true。
-    private var terminalBridgeEnabled = false
-    /// 记录哪一个直接子进程带着 App 私有覆盖层启动。若它在网页就绪前退出，
-    /// App 只自动重试一次不带插件的标准 DSH，避免壳层增强约束 DSH 升级。
-    private var notificationOverlayHandle: SpawnHandle?
-    private var skipNotificationPluginForNextSpawn = false
-    private var terminalOverlayHandle: SpawnHandle?
-    private var skipTerminalPluginForNextSpawn = false
-    private var operationFoldingOverlayHandle: SpawnHandle?
-    private var skipOperationFoldingPluginForNextSpawn = false
+    /// resolver 准备、句柄绑定和 bridge 授权统一由 typed controller 管理。
+    private var privatePluginBridgeCapabilities = PrivatePluginBridgeCapabilities.disabled
     /// 已处理过失权的 handle 不再重复 probe；停止权一旦撤销，绝不恢复。
     private var ownershipLossReconciledHandle: SpawnHandle?
     /// 只有菜单中的显式更新确认可以进入此状态。它与 AppKit 退出事务互斥，
@@ -143,11 +138,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     var alertHostWindow: NSWindow? { window }
 
     init(
-        bundleIdentifier: String,
         instanceLock: SingleInstanceLock,
         preferences: UserPreferences
     ) {
-        self.bundleIdentifier = bundleIdentifier
         self.instanceLock = instanceLock
         self.preferences = preferences
         super.init()
@@ -183,7 +176,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         window.isOpaque = true
         window.contentView = chrome
         chrome.install(hostingView: content, safeAreaLayoutGuide: chrome.safeAreaLayoutGuide)
-        titlebarControls.install(in: window)
+        titlebarControls.install(in: window, chrome: chrome)
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("DSHDesktopMainWindow")
@@ -206,13 +199,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     func beginStartup() {
         startupTask?.cancel()
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
-        notificationOverlayHandle = nil
-        terminalOverlayHandle = nil
-        operationFoldingOverlayHandle = nil
-        operationGeneration &+= 1
-        let generation = operationGeneration
+        privatePluginController.beginStartup()
+        revokePrivatePluginBridges()
+        let generation = serviceSession.beginStartupGeneration()
         presentation = .checking
         startupTask = Task { [weak self] in
             await self?.runStartup(generation: generation)
@@ -259,6 +248,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         panel.beginSheetModal(for: window ?? NSApp.mainWindow ?? NSWindow()) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
             guard DSHExecutable(url: url) != nil else {
+                self.serviceSession.transition(.launchFailed("所选文件不可执行。"))
                 self.presentation = .launchFailed("所选文件不可执行。")
                 return
             }
@@ -285,13 +275,15 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return await prepareForDSHUpdateWithoutOwnedHandle()
         }
 
-        let cleanupState = await supervisor.cleanupState(handle)
+        let cleanupState = await serviceSession.cleanupState(handle)
         guard currentHandle == handle else {
             return await prepareForDSHUpdateWithoutOwnedHandle()
         }
         switch cleanupState {
         case .clear:
-            currentHandle = nil
+            guard serviceSession.clearHandle(ifExpected: handle) else {
+                return await prepareForDSHUpdateWithoutOwnedHandle()
+            }
             terminationGate = .clear
             return await prepareForDSHUpdateWithoutOwnedHandle()
         case .awaitingReap:
@@ -302,12 +294,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return .busy("当前 App 会话无法可靠回收 DSH，重新打开 App 后再试。")
         }
 
-        guard await supervisor.verifyOwnership(handle) == .verified,
+        guard await serviceSession.verifyOwnership(handle) == .verified,
               currentHandle == handle else {
             return .externalServiceActive
         }
 
-        let terminationResult = await supervisor.requestTermination(handle)
+        let terminationResult = await serviceSession.requestTermination(handle)
         guard currentHandle == handle else {
             return await prepareForDSHUpdateWithoutOwnedHandle()
         }
@@ -325,10 +317,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         dependencyUpdatePreparationActive = true
         startupTask?.cancel()
         monitorTask?.cancel()
-        operationGeneration &+= 1
-        let updateGeneration = operationGeneration
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
+        let updateGeneration = serviceSession.beginStartupGeneration()
+        revokePrivatePluginBridges(for: handle)
         clearReadinessDeadline(for: handle)
         terminationGate = .cleanupPending
         presentation = .preparingDependencyUpdate
@@ -337,12 +327,24 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         while currentHandle == handle,
               dependencyUpdatePreparationActive,
               DispatchTime.now().uptimeNanoseconds < deadline {
-            _ = await supervisor.checkExit(handle)
-            if await supervisor.cleanupComplete() {
-                currentHandle = nil
+            _ = await serviceSession.checkExit(handle)
+            guard currentHandle == handle,
+                  operationGeneration == updateGeneration,
+                  dependencyUpdatePreparationActive,
+                  !Task.isCancelled else { break }
+            let cleanupComplete = await serviceSession.cleanupComplete()
+            guard currentHandle == handle,
+                  operationGeneration == updateGeneration,
+                  dependencyUpdatePreparationActive,
+                  !Task.isCancelled else { break }
+            if cleanupComplete {
+                guard serviceSession.clearHandle(ifExpected: handle) else { break }
                 resetRuntimeAfterOwnedDSHStoppedForUpdate()
-                let result = await probe.probe()
-                guard dependencyUpdatePreparationActive else {
+                let result = await serviceSession.probe()
+                guard operationGeneration == updateGeneration,
+                      currentHandle == nil,
+                      dependencyUpdatePreparationActive,
+                      !Task.isCancelled else {
                     return .busy("DeepSeek Harness 更新准备已取消。")
                 }
                 switch result {
@@ -378,7 +380,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func prepareForDSHUpdateWithoutOwnedHandle() async -> DSHUpdatePreparation {
-        let result = await probe.probe()
+        let result = await serviceSession.probe()
         guard currentHandle == nil,
               !terminationGate.waitsForSpawnResult,
               !quitPending else {
@@ -391,9 +393,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         dependencyUpdatePreparationActive = true
         startupTask?.cancel()
         monitorTask?.cancel()
-        operationGeneration &+= 1
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
+        _ = serviceSession.beginStartupGeneration()
+        revokePrivatePluginBridges()
         webContainer = nil
         terminationGate = .clear
         presentation = .updatingDependency
@@ -402,12 +403,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private func resetRuntimeAfterOwnedDSHStoppedForUpdate() {
         terminationGate = .clear
-        notificationOverlayHandle = nil
-        skipNotificationPluginForNextSpawn = false
-        terminalOverlayHandle = nil
-        skipTerminalPluginForNextSpawn = false
-        operationFoldingOverlayHandle = nil
-        skipOperationFoldingPluginForNextSpawn = false
+        privatePluginController.reset()
         reconciledExitedHandle = nil
         reachableServiceAfterExitHandle = nil
         lastObservedExit = nil
@@ -417,18 +413,20 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     func acceptUnknownExistingService() {
         guard case .unknownExistingService = presentation else { return }
+        serviceSession.transition(.acceptedUnknownService)
         showWebContainer(reloadExisting: true)
     }
 
     func rejectUnknownExistingService() {
         guard case .unknownExistingService = presentation else { return }
+        serviceSession.transition(.rejectedUnknownService)
         presentation = .serviceStopped
     }
 
     func showLogs() {
         Task { [weak self] in
             guard let self else { return }
-            self.logEntries = await self.supervisor.logSnapshot()
+            self.logEntries = await self.serviceSession.logSnapshot()
         }
     }
 
@@ -485,8 +483,9 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func runStartup(generation: UInt64) async {
-        let initial = await probe.probe()
+        let initial = await serviceSession.probe()
         guard generation == operationGeneration, !Task.isCancelled else { return }
+        serviceSession.recordProbe(initial, generation: generation)
 
         switch initial {
         case .dshLikely:
@@ -503,13 +502,16 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     private func locateAndSpawn(generation: UInt64) async {
         guard generation == operationGeneration, !Task.isCancelled else { return }
         presentation = .locating
-        guard let executable = locator.locate(lastChosenPath: preferences.selectedDSHPath) else {
+        guard let executable = serviceSession.locateExecutable(lastChosenPath: preferences.selectedDSHPath) else {
+            serviceSession.transition(.launchFailed("未找到可执行的 dsh。"))
             presentation = .dshNotFound
             return
         }
 
-        let preflight = await probe.probe()
+        serviceSession.beginPreflight(generation: generation)
+        let preflight = await serviceSession.probe()
         guard generation == operationGeneration, !Task.isCancelled else { return }
+        serviceSession.recordProbe(preflight, generation: generation)
         switch preflight {
         case .dshLikely:
             showWebContainer(reloadExisting: true)
@@ -524,76 +526,149 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             break
         }
 
-        guard await supervisor.canSpawn() else {
+        guard await serviceSession.canSpawn() else {
+            serviceSession.transition(.launchFailed("上一次创建的进程或日志清理尚未收敛，不能再次启动。"))
             presentation = .launchFailed("上一次创建的进程或日志清理尚未收敛，不能再次启动。")
             return
         }
 
-        let baseEnvironment = ProcessInfo.processInfo.environment
+        let baseEnvironment = AppRuntimeConfiguration.current.applyingLaunchOverrides(
+            to: ProcessInfo.processInfo.environment
+        )
         let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
-        let notificationPatchURL = prepareNotificationPlugin(
+        let privatePluginPatches = privatePluginController.preparePatches(
             baseEnvironment: baseEnvironment,
-            homeDirectory: homeDirectory
-        )
-        let terminalPatchURL = prepareTerminalPlugin(
-            baseEnvironment: baseEnvironment,
-            homeDirectory: homeDirectory
-        )
-        let operationFoldingPatchURL = prepareOperationFoldingPlugin(
-            baseEnvironment: baseEnvironment,
-            homeDirectory: homeDirectory
+            homeDirectory: homeDirectory,
+            resourceRoot: Bundle.main.resourceURL
         )
         let spec = LaunchEnvironment.makeSpec(
             executable: executable,
             baseEnvironment: baseEnvironment,
             homeDirectory: homeDirectory,
-            notificationPatchURL: notificationPatchURL,
-            terminalPatchURL: terminalPatchURL,
-            operationFoldingPatchURL: operationFoldingPatchURL
+            privatePluginPatches: privatePluginPatches
         )
         // 此门控必须早于任何 pipe、attr 或 posix_spawn 资源准备。
+        guard serviceSession.beginSpawn() else {
+            presentation = .launchFailed("当前生命周期状态不允许创建新的 DSH。")
+            return
+        }
         terminationGate = .spawnTransaction
         presentation = .starting
 
         do {
-            let handle = try await supervisor.spawn(spec)
+            let handle = try await serviceSession.spawn(spec)
             guard generation == operationGeneration else {
-                currentHandle = handle
+                let cleanupGeneration = operationGeneration
+                serviceSession.adoptHandleForCleanup(handle)
                 terminationGate = .cleanupPending
-                await continueDeferredTerminationAfterSpawnIfNeeded()
+                revokePrivatePluginBridges(for: handle)
+                convergeStaleSpawn(handle: handle, generation: cleanupGeneration)
                 return
             }
-            currentHandle = handle
-            notificationOverlayHandle = notificationPatchURL == nil ? nil : handle
-            terminalOverlayHandle = terminalPatchURL == nil ? nil : handle
-            operationFoldingOverlayHandle = operationFoldingPatchURL == nil ? nil : handle
+            serviceSession.installSpawnedHandle(handle)
+            privatePluginController.bindPreparedPatches(to: handle)
             reconciledExitedHandle = nil
             reachableServiceAfterExitHandle = nil
             lastObservedExit = nil
             ownershipLossReconciledHandle = nil
             resetReadinessDeadline(for: handle, generation: generation)
-            let ownership = await supervisor.verifyOwnership(handle)
-            terminationGate = ownership == .verified ? .stoppable : .cleanupPending
-            presentation = ownership == .verified ? .waitingForService : .ownershipLost
+            let ownership = await serviceSession.verifyOwnership(handle)
+            guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+            let postSpawnPresentation: Presentation
+            if ownership == .verified {
+                terminationGate = .stoppable
+                postSpawnPresentation = .waitingForService
+            } else {
+                _ = revokeOwnedRuntimeAuthority(for: handle)
+                postSpawnPresentation = .ownershipLost
+            }
             startMonitoring(handle: handle, generation: generation)
             if quitPending {
                 // 退出请求可能在 SpawnHandle 安装前到达。确认页真正出现前，
                 // 用此刻已知的状态替换最初的 .starting 快照，取消退出时才能
                 // 回到真实的等待/竞争状态。
-                presentationBeforeTermination = presentation
+                presentationBeforeTermination = postSpawnPresentation
                 await continueDeferredTerminationAfterSpawnIfNeeded()
-            } else if ownership == .verified {
-                await waitForReadiness(handle: handle, generation: generation)
+            } else {
+                presentation = postSpawnPresentation
+                if ownership == .verified {
+                    await waitForReadiness(handle: handle, generation: generation)
+                }
             }
         } catch {
+            // 旧 startupTask 可能在新 generation 开始后才从 `spawn` 抛错。
+            // 它不再拥有 plugin、reducer、termination gate 或 presentation，
+            // 因而不得重置新一轮已经建立的状态。
+            guard generation == operationGeneration, !Task.isCancelled else { return }
             terminationGate = .clear
-            notificationOverlayHandle = nil
-            terminalOverlayHandle = nil
-            operationFoldingOverlayHandle = nil
-            setNotificationBridgeEnabled(false)
-            setTerminalBridgeEnabled(false)
-            presentation = .launchFailed(describe(error))
+            privatePluginController.reset()
+            revokePrivatePluginBridges()
+            let message = describe(error)
+            serviceSession.transition(.launchFailed(message))
+            presentation = .launchFailed(message)
             await continueDeferredTerminationAfterSpawnIfNeeded()
+        }
+    }
+
+    /// 新一轮 startup 已覆盖旧 generation，但旧 `posix_spawn` 仍可能刚刚成功。
+    /// 该子进程从未成为可见会话，因此按事务回滚处理：只在身份仍匹配时发送一次
+    /// SIGTERM，随后等待 waitpid + stdout/stderr 自然收敛。任何失权或信号失败都
+    /// 只进入监督等待，绝不强杀、扫描端口进程或猜测 PID。
+    private func convergeStaleSpawn(handle: SpawnHandle, generation: UInt64) {
+        guard staleSpawnCleanupTask == nil else { return }
+        if !quitPending {
+            presentation = .drainingCleanup
+        }
+        staleSpawnCleanupTask = Task { @MainActor [weak self] in
+            await self?.runStaleSpawnConvergence(handle: handle, generation: generation)
+        }
+    }
+
+    private func runStaleSpawnConvergence(handle: SpawnHandle, generation: UInt64) async {
+        defer { staleSpawnCleanupTask = nil }
+
+        let ownership = await serviceSession.verifyOwnership(handle)
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+
+        if ownership == .verified {
+            _ = await serviceSession.requestTermination(handle)
+            guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+        }
+        terminationGate = .cleanupPending
+
+        while isCurrentLifecycle(handle: handle, generation: generation) {
+            _ = await serviceSession.checkExit(handle)
+            guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+
+            let cleanupComplete = await serviceSession.cleanupComplete()
+            guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+            if cleanupComplete {
+                let terminalError = await serviceSession.terminalIncompatibilityError()
+                guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+
+                if terminalError == nil {
+                    guard serviceSession.clearHandle(ifExpected: handle) else { return }
+                } else {
+                    guard serviceSession.clearHandle(
+                        ifExpected: handle,
+                        cleanup: .terminalUnavailable
+                    ) else { return }
+                }
+                terminationGate = quitPending ? .quitPending : .clear
+
+                if quitPending {
+                    await continueDeferredTerminationAfterSpawnIfNeeded()
+                } else if let terminalError {
+                    presentation = .terminalUnavailable(terminalError)
+                } else if !dependencyUpdatePreparationActive {
+                    // 无论清理期间又收到多少次 retry，最终都只为最新用户意图
+                    // 启动一轮；`beginStartup` 自己会生成新的 generation。
+                    beginStartup()
+                }
+                return
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
         }
     }
 
@@ -601,7 +676,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         while hasRemainingReadinessTime(for: handle, generation: generation) {
             guard generation == operationGeneration, currentHandle == handle, !Task.isCancelled, !quitPending else { return }
             guard let timeout = remainingReadinessTimeout(for: handle, generation: generation) else { break }
-            let result = await probe.probe(timeout: timeout)
+            let result = await serviceSession.probe(timeout: timeout)
             guard generation == operationGeneration, currentHandle == handle, !Task.isCancelled, !quitPending else { return }
 
             switch result {
@@ -616,7 +691,10 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 break
             }
 
-            switch await supervisor.checkExit(handle) {
+            let exitObservation = await serviceSession.checkExit(handle)
+            guard isCurrentLifecycle(handle: handle, generation: generation),
+                  !quitPending else { return }
+            switch exitObservation {
             case .running:
                 break
             case let .reaped(status):
@@ -630,6 +708,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
 
         guard currentHandle == handle, !Task.isCancelled, !quitPending else { return }
+        serviceSession.transition(.readinessTimedOut)
         presentation = .readinessTimedOut
     }
 
@@ -637,58 +716,184 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         monitorTask?.cancel()
         monitorTask = Task { [weak self] in
             guard let self else { return }
-            while !Task.isCancelled, self.currentHandle == handle, generation == self.operationGeneration {
-                let observation = await self.supervisor.checkExit(handle)
+            while self.isCurrentLifecycle(handle: handle, generation: generation) {
+                let observation = await self.serviceSession.checkExit(handle)
+                guard self.isCurrentLifecycle(handle: handle, generation: generation) else { return }
                 switch observation {
                 case .running:
-                    await self.reconcileOwnershipLossIfNeeded(handle: handle, generation: generation)
+                    if self.serviceSession.hasVerifiedListener(for: handle) {
+                        await self.reconcileVerifiedListener(
+                            handle: handle,
+                            generation: generation
+                        )
+                    } else {
+                        await self.reconcileProcessOwnershipLossIfNeeded(
+                            handle: handle,
+                            generation: generation
+                        )
+                    }
                 case let .reaped(status):
                     await self.reconcileExitedProcess(handle: handle, generation: generation, exitStatus: status)
                 case .terminalUnavailable, .staleHandle:
                     await self.reconcileExitedProcess(handle: handle, generation: generation)
                 }
+                guard self.isCurrentLifecycle(handle: handle, generation: generation) else { return }
                 // 退出确认、SIGTERM 与超时选择只由 `quitTask` 串行处理。
                 // 监视器继续负责观察退出，不能并行弹出第二个超时提示。
                 try? await Task.sleep(nanoseconds: 500_000_000)
+                guard self.isCurrentLifecycle(handle: handle, generation: generation) else { return }
             }
         }
     }
 
-    /// `runningOwned` 不是永久授权。只要后续 PID、启动时间或 PGID 的实测值不再
-    /// 匹配，本次会话立即永久失去停止权；此处只读探测服务，绝不停止、接管或重启
-    /// 端口上的任何进程。
-    private func reconcileOwnershipLossIfNeeded(handle: SpawnHandle, generation: UInt64) async {
-        let ownership = await supervisor.verifyOwnership(handle)
-        guard currentHandle == handle,
-              generation == operationGeneration,
-              !Task.isCancelled,
-              !quitPending else {
-            return
-        }
-        guard ownership != .verified,
-              ownershipLossReconciledHandle != handle else {
-            return
-        }
+    /// 任一异步观察只对启动它的 handle + App generation 生效。`Task` 取消、
+    /// 新 generation 开始或后继 handle 安装后，迟到结果都只能静默返回。
+    private func isCurrentLifecycle(handle: SpawnHandle, generation: UInt64) -> Bool {
+        !Task.isCancelled
+            && currentHandle == handle
+            && operationGeneration == generation
+    }
 
-        ownershipLossReconciledHandle = handle
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
-        terminationGate = .cleanupPending
-        clearReadinessDeadline(for: handle)
-        let result = await probe.probe()
-        guard currentHandle == handle,
-              generation == operationGeneration,
-              !Task.isCancelled,
-              !quitPending else {
-            return
+    /// listener（监听者）授权与直接子进程的停止权是两条独立能力。listener
+    /// 消失时必须立即永久撤销本轮 bridge，但只要 handle 和进程身份仍可验证，
+    /// App 仍可安全监督并在退出时停止自己创建的子进程。
+    @discardableResult
+    private func revokeListenerAuthority(
+        for handle: SpawnHandle,
+        clearReadiness: Bool = true
+    ) -> Bool {
+        guard currentHandle == handle else { return false }
+        serviceSession.transition(.listenerLost)
+        revokePrivatePluginBridges(for: handle)
+        if clearReadiness {
+            clearReadinessDeadline(for: handle)
         }
+        return true
+    }
+
+    /// 进程身份一旦失去，bridge 与 stopping right（停止权）都必须撤销。
+    /// 这条安全副作用不受退出确认 UI 影响；即使 `quitPending`，取消退出也不能
+    /// 恢复旧停止权，已展示的确认也不再携带 owned handle。
+    @discardableResult
+    private func revokeOwnedRuntimeAuthority(
+        for handle: SpawnHandle,
+        clearReadiness: Bool = true
+    ) -> Bool {
+        guard currentHandle == handle else { return false }
+        ownershipLossReconciledHandle = handle
+        serviceSession.transition(.ownershipLost)
+        revokePrivatePluginBridges(for: handle)
+        if clearReadiness {
+            clearReadinessDeadline(for: handle)
+        }
+        terminationGate = .cleanupPending
+
+        if let pendingQuitConfirmation,
+           pendingQuitConfirmation.ownedHandle == handle {
+            self.pendingQuitConfirmation = PendingQuitConfirmation(
+                transactionID: pendingQuitConfirmation.transactionID,
+                ownedHandle: nil
+            )
+            quitConfirmation = QuitConfirmation(
+                transactionID: pendingQuitConfirmation.transactionID,
+                stopsOwnedService: false
+            )
+        }
+        return true
+    }
+
+    /// bridge（原生桥接）授权不是一次性快照。页面被认定为 owned 后，每轮监视都
+    /// 同时复核直接子进程身份和 loopback listener（本机监听者）。listener 一旦
+    /// 消失，立即永久撤销本轮 bridge；即使同一子进程稍后恢复监听，也必须从关闭
+    /// bridge 的页面状态继续，不能复用旧授权。
+    private func reconcileVerifiedListener(handle: SpawnHandle, generation: UInt64) async {
+        let ownership = await serviceSession.verifyLocalServiceOwnership(handle)
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+
+        switch ownership {
+        case .verified:
+            return
+
+        case .notListening:
+            guard revokeListenerAuthority(for: handle) else { return }
+            // 退出确认期间也必须先撤销 bridge 与 verified listener；
+            // 只有用于展示端口现状的 probe/presentation 可以被延后；直接
+            // 子进程的安全监督与停止权不依赖 listener，因而继续保留。
+            guard !quitPending else { return }
+            let result = await serviceSession.probe()
+            guard isCurrentLifecycle(handle: handle, generation: generation),
+                  !quitPending else { return }
+            presentServiceAfterListenerLoss(result)
+
+        case .ownershipLost:
+            await reconcileConfirmedProcessOwnershipLoss(
+                handle: handle,
+                generation: generation
+            )
+
+        case let .alreadyExited(status):
+            await reconcileExitedProcess(handle: handle, generation: generation, exitStatus: status)
+        case .terminalUnavailable, .staleHandle:
+            await reconcileExitedProcess(handle: handle, generation: generation)
+        }
+    }
+
+    /// `runningOwned` 不是永久停止授权。只要后续 PID、启动时间或 PGID 的实测值
+    /// 不再匹配，本次会话立即永久失去停止权。
+    private func reconcileProcessOwnershipLossIfNeeded(
+        handle: SpawnHandle,
+        generation: UInt64
+    ) async {
+        let ownership = await serviceSession.verifyOwnership(handle)
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+        guard ownership != .verified else { return }
+        await reconcileConfirmedProcessOwnershipLoss(handle: handle, generation: generation)
+    }
+
+    /// 已确认失权后只读探测端口，不停止、接管或重启端口上的任何进程。
+    private func reconcileConfirmedProcessOwnershipLoss(
+        handle: SpawnHandle,
+        generation: UInt64,
+        knownProbeResult: ProbeResult? = nil
+    ) async {
+        guard isCurrentLifecycle(handle: handle, generation: generation),
+              ownershipLossReconciledHandle != handle else { return }
+        guard revokeOwnedRuntimeAuthority(for: handle) else { return }
+        guard !quitPending else { return }
+
+        let result = if let knownProbeResult {
+            knownProbeResult
+        } else {
+            await serviceSession.probe()
+        }
+        guard isCurrentLifecycle(handle: handle, generation: generation),
+              !quitPending else { return }
         await presentExternalServiceAfterOwnershipLoss(result)
     }
 
-    private func showWebContainer(reloadExisting: Bool = false) {
+    /// listener 丢失后，本轮 bridge 永久撤销；端口页面不能继承此前的 bridge
+    /// 授权，只能按此刻的只读探测结果重新展示。直接子进程停止权仍独立保留。
+    private func presentServiceAfterListenerLoss(_ result: ProbeResult) {
+        switch result {
+        case .dshLikely:
+            showWebContainer(reloadExisting: true)
+        case let .reachableUnknown(reason):
+            presentation = .unknownExistingService(reason)
+        case let .reachableNonHTML(reason):
+            presentation = .portAbnormal(reason)
+        case .unavailable:
+            presentation = .listenerLost
+        }
+    }
+
+    private func showWebContainer(
+        reloadExisting: Bool = false,
+        ownership: ServiceOwnership = .external
+    ) {
+        serviceSession.transition(.serviceReady(ownership: ownership))
         if let webContainer {
-            webContainer.setNotificationBridgeEnabled(notificationBridgeEnabled)
-            webContainer.setTerminalBridgeEnabled(terminalBridgeEnabled)
+            webContainer.setNotificationBridgeEnabled(privatePluginBridgeCapabilities.notification)
+            webContainer.setTerminalBridgeEnabled(privatePluginBridgeCapabilities.terminal)
             if reloadExisting {
                 webContainer.loadLocalService()
             }
@@ -699,8 +904,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             notificationCoordinator: notificationCoordinator,
             terminalController: terminalController
         )
-        container.setNotificationBridgeEnabled(notificationBridgeEnabled)
-        container.setTerminalBridgeEnabled(terminalBridgeEnabled)
+        container.setNotificationBridgeEnabled(privatePluginBridgeCapabilities.notification)
+        container.setTerminalBridgeEnabled(privatePluginBridgeCapabilities.terminal)
         container.onChromeStyleChange = { [weak self] style in
             self?.windowChrome?.apply(style: style)
             self?.terminalController.setSidebarWidth(style?.sidebarWidth)
@@ -715,7 +920,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     /// probe（服务探测），绝不会创建、停止或重新认领任何进程。
     private var canContinueWaitingForService: Bool {
         switch presentation {
-        case .readinessTimedOut, .portConflict, .ownershipLost, .drainingCleanup, .launchFailed:
+        case .readinessTimedOut, .portConflict, .listenerLost, .ownershipLost, .drainingCleanup, .launchFailed:
             return true
         default:
             return false
@@ -772,55 +977,51 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         handle: SpawnHandle,
         generation: UInt64
     ) async {
-        let ownership = await supervisor.verifyLocalServiceOwnership(
-            handle,
-            port: UInt16(LocalService.port)
-        )
-        guard currentHandle == handle, generation == operationGeneration, !Task.isCancelled else { return }
+        let ownership = await serviceSession.verifyLocalServiceOwnership(handle)
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
 
         switch ownership {
         case .verified:
+            guard !quitPending else { return }
             terminationGate = .stoppable
             clearReadinessDeadline(for: handle)
-            // `terminalOverlayHandle` 精确绑定到本次直接子进程。只有它仍是当前已验证
-            // listener 的 owner，才让 WebKit 页面得到终端 capability。
-            let terminalPatchPrepared = terminalOverlayHandle == handle
-            setTerminalBridgeEnabled(
-                DesktopTerminalBridgePolicy.mayEnable(
-                    serviceOwnership: .owned,
-                    terminalPatchPrepared: terminalPatchPrepared
-                )
-            )
             switch result {
             case .dshLikely, .reachableUnknown:
+                guard serviceSession.markVerifiedListener(for: handle) else { return }
+                applyPrivatePluginBridgeCapabilities(
+                    privatePluginController.authorizeBridges(
+                        ownershipVerification: ownership,
+                        handle: handle
+                    )
+                )
                 // 当前会话直接创建且 listener 已证明归属时，manifest 只保留兼容提示作用。
-                // 三个 overlay handle 只表示“本次带覆盖层且尚未 ready”；消费后即使
+                // typed launch state 只表示“本次带覆盖层且尚未 ready”；消费后即使
                 // 持久 WebContainer 仍存在，当前进程后续退出也不会误触发无插件重试。
-                notificationOverlayHandle = nil
-                terminalOverlayHandle = nil
-                operationFoldingOverlayHandle = nil
-                showWebContainer(reloadExisting: true)
+                privatePluginController.markReady(for: handle)
+                showWebContainer(reloadExisting: true, ownership: .owned)
             case let .reachableNonHTML(reason):
-                presentation = .launchFailed("本次 dsh 已监听 3080，但根页面不能作为 DSH HTML 加载（\(nonHTMLReasonText(reason))）。可继续检查或查看本次内存日志。")
+                revokePrivatePluginBridges(for: handle)
+                presentation = .launchFailed("本次 dsh 已监听 \(LocalService.port)，但根页面不能作为 DSH HTML 加载（\(nonHTMLReasonText(reason))）。可继续检查或查看本次内存日志。")
             case .unavailable:
-                break
+                _ = revokeListenerAuthority(for: handle)
+                presentation = .listenerLost
             }
 
         case .notListening:
             // 端口在 spawn 后被其他服务占用。保留直接子进程凭据，
-            // 但绝不把该网页服务或其监听者认定为 owned。
-            terminationGate = .stoppable
-            setNotificationBridgeEnabled(false)
-            setTerminalBridgeEnabled(false)
-            clearReadinessDeadline(for: handle)
-            presentation = .portConflict
+            // 但绝不把该网页服务或其监听者认定为 owned；在退出确认期间
+            // 同样先撤销权限，只省略 UI 更新。
+            guard revokeListenerAuthority(for: handle) else { return }
+            if !quitPending {
+                presentation = .portConflict
+            }
 
         case .ownershipLost:
-            setNotificationBridgeEnabled(false)
-            setTerminalBridgeEnabled(false)
-            terminationGate = .cleanupPending
-            clearReadinessDeadline(for: handle)
-            await presentExternalServiceAfterOwnershipLoss(result)
+            await reconcileConfirmedProcessOwnershipLoss(
+                handle: handle,
+                generation: generation,
+                knownProbeResult: result
+            )
 
         case let .alreadyExited(status):
             await reconcileExitedProcess(handle: handle, generation: generation, exitStatus: status)
@@ -831,8 +1032,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     /// 身份或监听复核失败后，端口页面一律按 external 重新处理。
     private func presentExternalServiceAfterOwnershipLoss(_ result: ProbeResult) async {
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
+        revokePrivatePluginBridges()
         switch result {
         case .dshLikely:
             showWebContainer(reloadExisting: true)
@@ -862,19 +1062,26 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         generation: UInt64,
         exitStatus: ProcessExitStatus? = nil
     ) async {
-        guard currentHandle == handle else { return }
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+        guard revokeOwnedRuntimeAuthority(for: handle, clearReadiness: false) else { return }
+        serviceSession.transition(.processExited)
         // 主 PID 已退出或已无法可靠确认；端口上即使仍有页面，也只能按 external 处理。
-        setNotificationBridgeEnabled(false)
-        setTerminalBridgeEnabled(false)
         if let exitStatus {
             lastObservedExit = (handle: handle, status: exitStatus)
         }
         let effectiveExitStatus = exitStatus ?? (lastObservedExit?.handle == handle ? lastObservedExit?.status : nil)
 
-        let cleanupComplete = await supervisor.cleanupComplete()
-        if let terminalError = await supervisor.terminalIncompatibilityError() {
+        let cleanupComplete = await serviceSession.cleanupComplete()
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+
+        let terminalError = await serviceSession.terminalIncompatibilityError()
+        guard isCurrentLifecycle(handle: handle, generation: generation) else { return }
+        if let terminalError {
             if cleanupComplete {
-                currentHandle = nil
+                guard serviceSession.clearHandle(
+                    ifExpected: handle,
+                    cleanup: .terminalUnavailable
+                ) else { return }
                 reconciledExitedHandle = nil
                 reachableServiceAfterExitHandle = nil
                 lastObservedExit = nil
@@ -884,6 +1091,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                     presentation = .terminalUnavailable(terminalError)
                 }
             } else {
+                serviceSession.transition(.cleanupChanged(.drainingPipes))
                 terminationGate = .cleanupPending
                 if !quitPending {
                     presentation = .drainingCleanup
@@ -893,9 +1101,17 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         }
 
         if cleanupComplete {
-            currentHandle = nil
-            terminationGate = quitPending ? .quitPending : .clear
+            if quitPending {
+                // 退出事务已激活时，handle 的最终清理与 AppKit reply
+                // 属于第二击路径。monitor 只记录进程已收敛，不与
+                // `waitForCleanupAndReply` 竞争清除同一 handle。
+                terminationGate = .quitPending
+            } else {
+                guard serviceSession.clearHandle(ifExpected: handle) else { return }
+                terminationGate = .clear
+            }
         } else {
+            serviceSession.transition(.cleanupChanged(.drainingPipes))
             terminationGate = .cleanupPending
         }
 
@@ -923,13 +1139,16 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         let result: ProbeResult
         if let timeout = remainingReadinessTimeout(for: handle, generation: generation) {
-            result = await probe.probe(timeout: timeout)
+            result = await serviceSession.probe(timeout: timeout)
         } else {
             // 服务已经处于 ready 后才退出时，仍保留一次受默认 2 秒限制的
             // post-exit probe；它不属于启动就绪等待窗口。
-            result = await probe.probe()
+            result = await serviceSession.probe()
         }
-        guard generation == operationGeneration, !quitPending else { return }
+        guard generation == operationGeneration,
+              !Task.isCancelled,
+              !quitPending,
+              cleanupComplete ? currentHandle == nil : currentHandle == handle else { return }
         switch result {
         case .dshLikely:
             reachableServiceAfterExitHandle = handle
@@ -963,7 +1182,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         generation: UInt64,
         exitStatus: ProcessExitStatus?
     ) async {
-        let result = await probe.probe()
+        let result = await serviceSession.probe()
         guard generation == operationGeneration,
               !quitPending,
               currentHandle == nil,
@@ -992,87 +1211,19 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         )
     }
 
-    /// 找到 bundle 内完整的已构建插件后，才建立 DSH 的 resolver 链接并启用
-    /// 本次启动覆盖层。准备失败不妨碍薄壳的核心启动路径，只会安全地没有提醒。
-    private func prepareNotificationPlugin(
-        baseEnvironment: [String: String],
-        homeDirectory: URL
-    ) -> URL? {
-        if skipNotificationPluginForNextSpawn {
-            skipNotificationPluginForNextSpawn = false
-            setNotificationBridgeEnabled(false)
-            return nil
-        }
-        guard let resourceRoot = Bundle.main.resourceURL,
-              let plugin = DSHNotificationPlugin(
-                directory: resourceRoot.appendingPathComponent(
-                    DSHNotificationPlugin.resourcesDirectoryName,
-                    isDirectory: true
-                )
-              ) else {
-            setNotificationBridgeEnabled(false)
-            return nil
-        }
-
-        do {
-            try plugin.prepareResolver(
-                baseEnvironment: baseEnvironment,
-                workingDirectory: homeDirectory,
-                homeDirectory: homeDirectory
-            )
-            setNotificationBridgeEnabled(true)
-            return plugin.patchURL
-        } catch {
-            setNotificationBridgeEnabled(false)
-            return nil
-        }
-    }
-
-    private func setNotificationBridgeEnabled(_ enabled: Bool) {
-        notificationBridgeEnabled = enabled
-        webContainer?.setNotificationBridgeEnabled(enabled)
-    }
-
-    /// 终端插件的 resolver 与提醒插件完全独立。准备成功只代表本次启动可以带上
-    /// `--patch`；真正向页面开启 bridge 要等 listener ownership 复核通过。
-    private func prepareTerminalPlugin(
-        baseEnvironment: [String: String],
-        homeDirectory: URL
-    ) -> URL? {
-        if skipTerminalPluginForNextSpawn {
-            skipTerminalPluginForNextSpawn = false
-            setTerminalBridgeEnabled(false)
-            return nil
-        }
-        guard let resourceRoot = Bundle.main.resourceURL,
-              let plugin = DSHTerminalPlugin(
-                directory: resourceRoot.appendingPathComponent(
-                    DSHTerminalPlugin.resourcesDirectoryName,
-                    isDirectory: true
-                )
-              ) else {
-            setTerminalBridgeEnabled(false)
-            return nil
-        }
-
-        do {
-            try plugin.prepareResolver(
-                baseEnvironment: baseEnvironment,
-                workingDirectory: homeDirectory,
-                homeDirectory: homeDirectory
-            )
-            return plugin.patchURL
-        } catch {
-            setTerminalBridgeEnabled(false)
-            return nil
-        }
-    }
-
-    private func setTerminalBridgeEnabled(_ enabled: Bool) {
-        terminalBridgeEnabled = enabled
-        webContainer?.setTerminalBridgeEnabled(enabled)
-        terminalController.setBridgeEnabled(enabled)
+    private func applyPrivatePluginBridgeCapabilities(_ capabilities: PrivatePluginBridgeCapabilities) {
+        privatePluginBridgeCapabilities = capabilities
+        webContainer?.setNotificationBridgeEnabled(capabilities.notification)
+        webContainer?.setTerminalBridgeEnabled(capabilities.terminal)
+        terminalController.setBridgeEnabled(capabilities.terminal)
         refreshTerminalTitlebarControl()
+    }
+
+    /// verified listener（已验证监听者）和 native bridge 必须同时撤销，避免只关掉
+    /// WebKit message handler，却让监视器继续把旧 listener 授权当作有效快照。
+    private func revokePrivatePluginBridges(for handle: SpawnHandle? = nil) {
+        serviceSession.revokeVerifiedListener(for: handle)
+        applyPrivatePluginBridgeCapabilities(privatePluginController.revokeBridges())
     }
 
     private func refreshTerminalTitlebarControl() {
@@ -1082,57 +1233,16 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         )
     }
 
-    /// 操作折叠插件只是 DSH 客户端的私有表现层，不需要 native bridge。
-    /// 插件缺失、resolver 被占用或上游不兼容时，核心 Web UI 照常启动。
-    private func prepareOperationFoldingPlugin(
-        baseEnvironment: [String: String],
-        homeDirectory: URL
-    ) -> URL? {
-        if skipOperationFoldingPluginForNextSpawn {
-            skipOperationFoldingPluginForNextSpawn = false
-            return nil
-        }
-        guard let resourceRoot = Bundle.main.resourceURL,
-              let plugin = DSHOperationFoldingPlugin(
-                directory: resourceRoot.appendingPathComponent(
-                    DSHOperationFoldingPlugin.resourcesDirectoryName,
-                    isDirectory: true
-                )
-              ) else {
-            return nil
-        }
-
-        do {
-            try plugin.prepareResolver(
-                baseEnvironment: baseEnvironment,
-                workingDirectory: homeDirectory,
-                homeDirectory: homeDirectory
-            )
-            return plugin.patchURL
-        } catch {
-            return nil
-        }
-    }
-
     /// 覆盖层只要让 DSH 在页面就绪前失败一次，就退回标准启动命令。此路径没有
     /// 轮询或守护进程：它复用原有的退出收敛后启动流程，而且每次失败只尝试一次。
     private func retryWithoutPrivatePluginsIfNeeded(handle: SpawnHandle) -> Bool {
-        let overlayPrepared = notificationOverlayHandle == handle
-            || terminalOverlayHandle == handle
-            || operationFoldingOverlayHandle == handle
-        guard PrivatePluginFallbackPolicy.shouldRetry(
-            overlayPendingForCurrentSpawn: overlayPrepared,
+        guard privatePluginController.scheduleFallbackIfNeeded(
+            for: handle,
             quitPending: quitPending
         ) else {
             return false
         }
-        notificationOverlayHandle = nil
-        terminalOverlayHandle = nil
-        operationFoldingOverlayHandle = nil
-        skipNotificationPluginForNextSpawn = true
-        skipTerminalPluginForNextSpawn = true
-        skipOperationFoldingPluginForNextSpawn = true
-        setTerminalBridgeEnabled(false)
+        revokePrivatePluginBridges(for: handle)
         beginStartup()
         return true
     }
@@ -1155,76 +1265,143 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
     private func beginDeferredTermination() {
         guard !quitPending else { return }
-        let waitsForSpawnResult = terminationGate.waitsForSpawnResult
+        serviceSession.transition(.beginQuit)
+        let originalGate = terminationGate
         presentationBeforeTermination = presentation
         quitPending = true
         let transactionID = beginTerminationTransaction()
+        confirmedTerminationReadyID = nil
 
-        // 这里不能把正在进行的 spawn 误当作“没有活动 handle”。
-        // `posix_spawn` 已可能创建子进程；必须等其成功后安装/收尾，或失败后释放资源，
-        // 再通过 `continueDeferredTerminationAfterSpawnIfNeeded()` 回复 AppKit。
-        if waitsForSpawnResult {
-            return
+        // 第一击永远只展示确认层：不 await cleanup、不关闭 PTY、不发信号，
+        // 也不因为 handle 已经 clear/draining 就提前回复 AppKit。spawn transaction
+        // 仍保留原门控，第二击后由迟到的 spawn 结果继续同一事务。
+        if !originalGate.waitsForSpawnResult {
+            terminationGate = .quitPending
         }
-        terminationGate = .quitPending
-
-        guard let handle = currentHandle else {
-            presentQuitConfirmation(ownedHandle: nil, transactionID: transactionID)
-            return
-        }
-
-        quitTask?.cancel()
-        quitTask = Task { [weak self] in
-            guard let self else { return }
-            let cleanupState = await self.supervisor.cleanupState(handle)
-            guard self.isActiveTerminationTransaction(transactionID) else { return }
-            switch cleanupState {
-            case .awaitingReap:
-                let ownership = await self.supervisor.verifyOwnership(handle)
-                guard self.isActiveTerminationTransaction(transactionID) else { return }
-                if ownership == .verified {
-                    self.presentQuitConfirmation(ownedHandle: handle, transactionID: transactionID)
-                } else {
-                    await self.waitForCleanupAndReply(
-                        handle: handle,
-                        timeoutNanoseconds: 10_000_000_000,
-                        transactionID: transactionID
-                    )
-                }
-            case .supervisionOnly, .terminalUnavailable, .drainingPipes, .orphanDrainIncompatible:
-                await self.waitForCleanupAndReply(
-                    handle: handle,
-                    timeoutNanoseconds: 10_000_000_000,
-                    transactionID: transactionID
-                )
-            case .clear:
-                self.replyToTermination(allow: true, transactionID: transactionID)
-            }
-        }
+        let displayedOwnedHandle = originalGate == .stoppable ? currentHandle : nil
+        presentQuitConfirmation(
+            ownedHandle: displayedOwnedHandle,
+            transactionID: transactionID
+        )
     }
 
     private func continueDeferredTerminationAfterSpawnIfNeeded() async {
         guard let transactionID = terminationTransactions.activeID,
               isActiveTerminationTransaction(transactionID) else { return }
-        guard let handle = currentHandle else {
-            presentQuitConfirmation(ownedHandle: nil, transactionID: transactionID)
+
+        // 确认层已经在第一击同步展示。第二击之前，迟到的 spawn
+        // 只更新确认层的 owned 提示；第二击且 PTY 收敛之后，才进入
+        // 停止/清理路径。
+        guard confirmedTerminationReadyID == transactionID else {
+            await refreshPresentedQuitOwnership(transactionID: transactionID)
             return
         }
-        let cleanupState = await supervisor.cleanupState(handle)
-        guard isActiveTerminationTransaction(transactionID) else { return }
-        if cleanupState == .awaitingReap {
-            let ownership = await supervisor.verifyOwnership(handle)
-            guard isActiveTerminationTransaction(transactionID) else { return }
-            if ownership == .verified {
-                presentQuitConfirmation(ownedHandle: handle, transactionID: transactionID)
-                return
-            }
+
+        // `posix_spawn` 尚未返回时不能把 nil handle 当成“无子进程”。
+        // 成功或失败回调会再次进入本方法。
+        guard !terminationGate.waitsForSpawnResult else { return }
+        await continueConfirmedTermination(transactionID: transactionID)
+    }
+
+    private func refreshPresentedQuitOwnership(transactionID: UInt64) async {
+        guard isActiveTerminationTransaction(transactionID),
+              quitConfirmation?.transactionID == transactionID,
+              pendingQuitConfirmation?.transactionID == transactionID else { return }
+        guard let handle = currentHandle else {
+            updatePresentedQuitOwnership(nil, transactionID: transactionID)
+            return
         }
-        await waitForCleanupAndReply(
-            handle: handle,
-            timeoutNanoseconds: 10_000_000_000,
+        let cleanupState = await serviceSession.cleanupState(handle)
+        guard isActiveTerminationTransaction(transactionID),
+              currentHandle == handle else { return }
+        guard cleanupState == .awaitingReap else {
+            updatePresentedQuitOwnership(nil, transactionID: transactionID)
+            return
+        }
+        let ownership = await serviceSession.verifyOwnership(handle)
+        guard isActiveTerminationTransaction(transactionID),
+              currentHandle == handle else { return }
+        updatePresentedQuitOwnership(
+            ownership == .verified ? handle : nil,
             transactionID: transactionID
         )
+    }
+
+    private func updatePresentedQuitOwnership(
+        _ ownedHandle: SpawnHandle?,
+        transactionID: UInt64
+    ) {
+        guard isActiveTerminationTransaction(transactionID),
+              quitConfirmation?.transactionID == transactionID,
+              pendingQuitConfirmation?.transactionID == transactionID else { return }
+        let effectiveOwnedHandle = ownedHandle.flatMap { handle in
+            ownershipLossReconciledHandle == handle ? nil : handle
+        }
+        pendingQuitConfirmation = PendingQuitConfirmation(
+            transactionID: transactionID,
+            ownedHandle: effectiveOwnedHandle
+        )
+        quitConfirmation = QuitConfirmation(
+            transactionID: transactionID,
+            stopsOwnedService: effectiveOwnedHandle != nil
+        )
+    }
+
+    /// 只在第二击已确认且 PTY 收敛后调用。每次都重读当前 handle
+    /// 和 ownership，不信任第一击时仅用于展示的快照。
+    private func continueConfirmedTermination(transactionID: UInt64) async {
+        guard isActiveTerminationTransaction(transactionID),
+              confirmedTerminationReadyID == transactionID else { return }
+        guard let handle = currentHandle else {
+            replyToTermination(allow: true, transactionID: transactionID)
+            return
+        }
+
+        let cleanupState = await serviceSession.cleanupState(handle)
+        guard isActiveTerminationTransaction(transactionID),
+              confirmedTerminationReadyID == transactionID else { return }
+        guard currentHandle == handle else {
+            if currentHandle == nil {
+                replyToTermination(allow: true, transactionID: transactionID)
+            }
+            return
+        }
+
+        switch cleanupState {
+        case .awaitingReap:
+            let ownership = await serviceSession.verifyOwnership(handle)
+            guard isActiveTerminationTransaction(transactionID),
+                  confirmedTerminationReadyID == transactionID,
+                  currentHandle == handle else { return }
+            if ownership == .verified {
+                requestOwnedTermination(handle: handle, transactionID: transactionID)
+            } else {
+                _ = revokeOwnedRuntimeAuthority(for: handle)
+                beginCleanupWait(handle: handle, transactionID: transactionID)
+            }
+
+        case .clear:
+            guard serviceSession.clearHandle(ifExpected: handle) || currentHandle == nil else {
+                return
+            }
+            replyToTermination(allow: true, transactionID: transactionID)
+
+        case .supervisionOnly, .terminalUnavailable, .drainingPipes, .orphanDrainIncompatible:
+            beginCleanupWait(handle: handle, transactionID: transactionID)
+        }
+    }
+
+    private func beginCleanupWait(handle: SpawnHandle, transactionID: UInt64) {
+        guard isActiveTerminationTransaction(transactionID),
+              confirmedTerminationReadyID == transactionID else { return }
+        quitTask?.cancel()
+        quitTask = Task { [weak self] in
+            await self?.waitForCleanupAndReply(
+                handle: handle,
+                timeoutNanoseconds: 10_000_000_000,
+                transactionID: transactionID
+            )
+        }
     }
 
     private func presentQuitConfirmation(ownedHandle: SpawnHandle?, transactionID: UInt64) {
@@ -1234,16 +1411,20 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             return
         }
 
+        let effectiveOwnedHandle = ownedHandle.flatMap { handle in
+            ownershipLossReconciledHandle == handle ? nil : handle
+        }
+
         // 提示层出现时保留原页面，不提前发送信号，也不切换为“正在停止”。
         // 只有用户再次按 ⌘Q 后才会退出；仅带有 owned handle 的确认会停止 DSH。
         terminationConfirmation.present(for: transactionID)
         pendingQuitConfirmation = PendingQuitConfirmation(
             transactionID: transactionID,
-            ownedHandle: ownedHandle
+            ownedHandle: effectiveOwnedHandle
         )
         quitConfirmation = QuitConfirmation(
             transactionID: transactionID,
-            stopsOwnedService: ownedHandle != nil
+            stopsOwnedService: effectiveOwnedHandle != nil
         )
         scheduleStopConfirmationAutoCancellation(for: transactionID)
     }
@@ -1260,27 +1441,43 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             // 等待所有 PTY process group 完成清理。
             await self.terminalController.closeAllAndWait()
             guard self.isActiveTerminationTransaction(confirmation.transactionID) else { return }
-            if let handle = confirmation.ownedHandle {
-                self.requestOwnedTermination(handle: handle, transactionID: confirmation.transactionID)
-            } else {
-                self.replyToTermination(allow: true, transactionID: confirmation.transactionID)
-            }
+            self.confirmedTerminationReadyID = confirmation.transactionID
+            await self.continueDeferredTerminationAfterSpawnIfNeeded()
         }
     }
 
     private func requestOwnedTermination(handle: SpawnHandle, transactionID: UInt64) {
         guard isActiveTerminationTransaction(transactionID) else { return }
+        if ownershipLossReconciledHandle == handle {
+            // 确认被消费后、真正请求停止前仍可能失去 listener/进程身份。
+            // 已撤销的停止权不能因为旧确认对象仍持有 handle 而恢复。
+            quitTask?.cancel()
+            quitTask = Task { [weak self] in
+                await self?.waitForCleanupAndReply(
+                    handle: handle,
+                    timeoutNanoseconds: 10_000_000_000,
+                    transactionID: transactionID
+                )
+            }
+            return
+        }
+        serviceSession.transition(.beginStoppingOwnedService)
         presentation = .stopping
         quitTask?.cancel()
         quitTask = Task { [weak self] in
             guard let self else { return }
-            let result = await self.supervisor.requestTermination(handle)
+            let result = await self.serviceSession.requestTermination(handle)
             guard self.isActiveTerminationTransaction(transactionID) else { return }
             switch result {
             case .signalSent:
                 guard self.terminationTransactions.markSignalRequested(for: transactionID) else { return }
                 self.presentation = .stopping
-            case .alreadyExited, .ownershipLost, .terminalUnavailable, .signalFailed, .staleHandle:
+            case .alreadyExited:
+                self.presentation = .stopping
+            case .ownershipLost, .terminalUnavailable, .signalFailed, .staleHandle:
+                // supervisor 已经拒绝信号权。不等 monitor 下一轮，
+                // 立即撤销 bridge 和 coordinator 中的 owned 快照。
+                _ = self.revokeOwnedRuntimeAuthority(for: handle)
                 self.presentation = .stopping
             }
             await self.waitForCleanupAndReply(
@@ -1298,15 +1495,28 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     ) async {
         let deadline = DispatchTime.now().uptimeNanoseconds &+ timeoutNanoseconds
         while isActiveTerminationTransaction(transactionID), !Task.isCancelled {
-            if await supervisor.cleanupComplete() {
-                guard isActiveTerminationTransaction(transactionID) else { return }
-                currentHandle = nil
+            _ = await serviceSession.checkExit(handle)
+            guard isActiveTerminationTransaction(transactionID),
+                  !Task.isCancelled else { return }
+            let cleanupComplete = await serviceSession.cleanupComplete()
+            guard isActiveTerminationTransaction(transactionID),
+                  !Task.isCancelled else { return }
+            if cleanupComplete {
+                if currentHandle == handle {
+                    guard serviceSession.clearHandle(ifExpected: handle) else { return }
+                } else {
+                    // monitor 可能在本 await 恢复前已清除同一 handle。
+                    // nil 表示相同生命周期已收敛，仍必须由当前事务
+                    // exactly-once 回复 AppKit；不同的新 handle 则不能越权放行。
+                    guard currentHandle == nil else { return }
+                }
                 replyToTermination(allow: true, transactionID: transactionID)
                 return
             }
             if DispatchTime.now().uptimeNanoseconds >= deadline {
                 guard isActiveTerminationTransaction(transactionID) else { return }
                 presentation = .stopTimedOut
+                serviceSession.transition(.stopTimedOut)
                 presentTimeoutChoices(handle: handle, transactionID: transactionID)
                 return
             }
@@ -1348,10 +1558,14 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         quitTask?.cancel()
         quitTask = nil
         quitPending = false
+        confirmedTerminationReadyID = nil
+        serviceSession.transition(.cancelQuit)
         _ = terminationTransactions.cancel(transactionID)
 
         guard let handle = currentHandle else {
-            terminationGate = restoredGate == .quitPending ? .clear : restoredGate
+            // 没有 handle 就没有 stopping right（停止权）；旧事务开始时的
+            // `.stoppable` 快照绝不能在异步清理已完成后复活。
+            terminationGate = .clear
             presentation = restoredPresentation ?? (webContainer == nil ? .serviceStopped : .ready)
             presentationBeforeTermination = nil
             replyToTermination(allow: false, transactionID: transactionID)
@@ -1360,8 +1574,12 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
 
         // 先移除旧事务，再恢复它开始时最后一次确认的真实门控快照，最后才
         // reply(false)。若已发过 SIGTERM，则信号权不可恢复，只能保持 cleanupPending。
-        terminationGate = restoredGate == .quitPending ? .cleanupPending : restoredGate
-        if signalWasRequested {
+        terminationGate = ownershipLossReconciledHandle == handle
+            ? .cleanupPending
+            : (restoredGate == .quitPending ? .cleanupPending : restoredGate)
+        if ownershipLossReconciledHandle == handle {
+            presentation = .ownershipLost
+        } else if signalWasRequested {
             presentation = webContainer == nil ? .drainingCleanup : .ready
         } else if let restoredPresentation {
             presentation = restoredPresentation
@@ -1372,19 +1590,30 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         replyToTermination(allow: false, transactionID: transactionID)
         resumeReadinessAfterCancelledTermination(handle: handle, signalWasRequested: signalWasRequested)
 
+        let cancellationGeneration = operationGeneration
         Task { [weak self] in
             guard let self else { return }
-            let cleanupState = await self.supervisor.cleanupState(handle)
+            let cleanupState = await self.serviceSession.cleanupState(handle)
             guard self.currentHandle == handle,
+                  self.operationGeneration == cancellationGeneration,
+                  !Task.isCancelled,
                   !self.quitPending,
                   self.terminationTransactions.activeID == nil,
                   self.terminationTransactions.latestID == transactionID else { return }
+            if self.ownershipLossReconciledHandle == handle {
+                self.terminationGate = .cleanupPending
+                self.presentation = .ownershipLost
+                return
+            }
             if cleanupState == .awaitingReap {
-                let ownership = await self.supervisor.verifyOwnership(handle)
+                let ownership = await self.serviceSession.verifyOwnership(handle)
                 guard self.currentHandle == handle,
+                      self.operationGeneration == cancellationGeneration,
+                      !Task.isCancelled,
                       !self.quitPending,
                       self.terminationTransactions.activeID == nil,
-                      self.terminationTransactions.latestID == transactionID else { return }
+                      self.terminationTransactions.latestID == transactionID,
+                      self.ownershipLossReconciledHandle != handle else { return }
                 if ownership == .verified {
                     self.terminationGate = .stoppable
                     self.presentation = self.webContainer == nil ? .waitingForService : .ready
@@ -1392,23 +1621,29 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                 }
             }
 
-            let cleanupComplete = await self.supervisor.cleanupComplete()
+            let cleanupComplete = await self.serviceSession.cleanupComplete()
             guard self.currentHandle == handle,
+                  self.operationGeneration == cancellationGeneration,
+                  !Task.isCancelled,
                   !self.quitPending,
                   self.terminationTransactions.activeID == nil,
                   self.terminationTransactions.latestID == transactionID else { return }
             if cleanupComplete {
-                self.currentHandle = nil
+                let terminalError = await self.serviceSession.terminalIncompatibilityError()
+                guard self.currentHandle == handle,
+                      self.operationGeneration == cancellationGeneration,
+                      !Task.isCancelled,
+                      !self.quitPending,
+                      self.terminationTransactions.activeID == nil,
+                      self.terminationTransactions.latestID == transactionID else { return }
+                guard self.serviceSession.clearHandle(ifExpected: handle) else { return }
                 self.terminationGate = .clear
-                if let terminalError = await self.supervisor.terminalIncompatibilityError() {
-                    guard !self.quitPending,
-                          self.terminationTransactions.activeID == nil,
-                          self.terminationTransactions.latestID == transactionID else { return }
+                if let terminalError {
                     self.presentation = .terminalUnavailable(terminalError)
                 } else if self.reachableServiceAfterExitHandle == handle {
                     await self.refreshExternalServiceAfterCleanup(
                         handle: handle,
-                        generation: self.operationGeneration,
+                        generation: cancellationGeneration,
                         exitStatus: self.lastObservedExit?.handle == handle
                             ? self.lastObservedExit?.status
                             : nil
@@ -1443,6 +1678,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         dismissQuitConfirmation(for: transactionID)
         terminationConfirmation.clear(for: transactionID)
         guard terminationTransactions.markReplySent(for: transactionID) else { return }
+        confirmedTerminationReadyID = nil
         NSApp.reply(toApplicationShouldTerminate: allow)
     }
 

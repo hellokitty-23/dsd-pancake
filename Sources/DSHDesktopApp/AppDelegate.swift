@@ -10,7 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         preferences: preferences,
         dshUpdateService: dshUpdateService
     )
-    private let updatePopover = UpdatePopoverController()
+    private let updateOverlay = UpdateOverlayController()
     private var completionNotificationModeMenuItems: [DesktopNotificationDeliveryMode: NSMenuItem] = [:]
     private var checkUpdatesMenuItem: NSMenuItem?
     private var updateTask: Task<Void, Never>?
@@ -114,7 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
 
             let coordinator = AppCoordinator(
-                bundleIdentifier: bundleIdentifier,
                 instanceLock: lock,
                 preferences: preferences
             )
@@ -122,13 +121,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             coordinator.installMainWindow()
             updateStatus.onAvailabilityChange = { [weak self] availability in
                 self?.coordinator?.setUpdateAvailability(availability)
-                self?.updatePopover.updateAvailability(availability)
+                self?.updateOverlay.updateAvailability(availability)
             }
             coordinator.onUpdateIndicatorPressed = { [weak self] button in
-                self?.updatePopover.toggle(relativeTo: button)
+                self?.updateOverlay.toggle(relativeTo: button)
             }
-            updatePopover.onRequestDSHUpdate = { [weak self] _ in
-                self?.startDSHUpdateFromPopover()
+            updateOverlay.onRequestDSHUpdate = { [weak self] _ in
+                self?.startDSHUpdateFromOverlay()
             }
             updateStatus.start()
             coordinator.prepareNotificationAuthorization()
@@ -144,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillTerminate(_ notification: Notification) {
         updateStatus.stop()
-        updatePopover.cancelDownload()
+        updateOverlay.cancelAll()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -165,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 message: "请等待本次只读检查结束后再退出，或稍后重试。"
             )
         }
-        if updatePopover.isDownloading {
+        if updateOverlay.isDownloading {
             return cancelTerminationWithAlert(
                 title: "正在下载更新",
                 message: "请先在更新浮层中取消或等待下载完成，避免留下不完整文件。"
@@ -183,8 +182,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         alert.messageText = title
         alert.informativeText = message
         alert.addButton(withTitle: "知道了")
-        if let window = coordinator?.alertHostWindow, window.attachedSheet == nil {
-            alert.beginSheetModal(for: window)
+        if let window = coordinator?.alertHostWindow {
+            // `⌘W` 只把主窗口隐藏。此时直接挂 sheet 会得到一个不可见的退出拦截：
+            // App 已取消退出，但用户既看不到原因也无法关闭提示。先恢复同一个主窗口，
+            // 再附着 sheet；窗口本来可见时则保持现有层级与焦点语义。
+            if !window.isVisible {
+                coordinator?.restoreMainWindow()
+            }
+            if window.attachedSheet == nil {
+                alert.beginSheetModal(for: window)
+            }
         }
         return .terminateCancel
     }
@@ -240,14 +247,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         coordinator.presentAvailableUpdatesFromMenu()
     }
 
-    private func startDSHUpdateFromPopover() {
+    private func startDSHUpdateFromOverlay() {
         guard updateTask == nil, !updateStatus.isChecking else { return }
         updateTask = Task { @MainActor [weak self] in
-            await self?.runDSHUpdateFromPopover()
+            await self?.runDSHUpdateFromOverlay()
         }
     }
 
-    private func runDSHUpdateFromPopover() async {
+    private func runDSHUpdateFromOverlay() async {
         defer {
             checkUpdatesMenuItem?.title = "检查更新…"
             checkUpdatesMenuItem?.isEnabled = true
@@ -300,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case .externalServiceActive:
             await presentUpdateAlert(
                 title: "检测到外部 DSH 服务",
-                message: "127.0.0.1:3080 上的服务不能确认由本次 App 创建。为避免修改正在运行的外部 DSH，请先自行停止该服务，再重新检查更新。",
+                message: "\(LocalService.hostAndPort) 上的服务不能确认由本次 App 创建。为避免修改正在运行的外部 DSH，请先自行停止该服务，再重新检查更新。",
                 style: .warning
             )
             return

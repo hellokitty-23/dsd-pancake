@@ -22,8 +22,8 @@ final class AppTitlebarControls: NSObject {
         super.init()
     }
 
-    func install(in window: NSWindow) {
-        installUpdateControl(in: window)
+    func install(in window: NSWindow, chrome: WindowChromeContainer) {
+        installUpdateControl(in: chrome)
         installTerminalControl(in: window)
         renderUpdateControl()
         renderTerminalControl()
@@ -48,10 +48,10 @@ final class AppTitlebarControls: NSObject {
         renderTerminalControl()
     }
 
-    /// 更新状态属于壳层而非网页。左侧 accessory 的透明占位宽度将按钮放在侧栏右缘
-    /// 附近，同时保留红绿灯的系统安全区域；它不会占用 DSH 顶部 header 的布局。
-    private func installUpdateControl(in window: NSWindow) {
-        let button = NSButton(frame: NSRect(x: 224, y: 2, width: 28, height: 24))
+    /// 更新入口和浮层共用 `WindowChromeContainer` 的坐标。图标位置由网页只读
+    /// 上报的侧栏宽度决定，不再用透明 accessory 猜测侧栏右缘。
+    private func installUpdateControl(in chrome: WindowChromeContainer) {
+        let button = NSButton(frame: NSRect(origin: .zero, size: UpdateOverlayLayout.indicatorSize))
         button.bezelStyle = .toolbar
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
@@ -61,14 +61,8 @@ final class AppTitlebarControls: NSObject {
         )?.withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
         button.target = self
         button.action = #selector(showAvailableUpdates(_:))
-
-        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 28))
-        holder.addSubview(button)
-
-        let accessory = NSTitlebarAccessoryViewController()
-        accessory.layoutAttribute = .left
-        accessory.view = holder
-        window.addTitlebarAccessoryViewController(accessory)
+        button.setAccessibilityLabel("打开可选更新")
+        chrome.installUpdateIndicator(button)
         updateButton = button
     }
 

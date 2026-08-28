@@ -180,7 +180,7 @@ final class UpdateStatusController {
         )
     }
 
-    /// 从 Popover 点击“更新 DSH”前必须重新读取本机版本和 npm latest，不能直接使用
+    /// 从 Overlay（壳内浮层）点击“更新 DSH”前必须重新读取本机版本和 npm latest，不能直接使用
     /// 缓存版本进入写入流程。该显式操作只检查 DSH，不会顺带安装或下载 App。
     func checkDSHForExplicitUpdate() async -> DSHCheckResult? {
         guard !isChecking else { return nil }

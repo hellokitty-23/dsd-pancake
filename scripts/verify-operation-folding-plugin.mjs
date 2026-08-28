@@ -1,6 +1,38 @@
-import { execFileSync } from "node:child_process"
 import { readFile } from "node:fs/promises"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { pathToFileURL } from "node:url"
+
+import {
+  OfficialChatView,
+  OfficialHeader,
+  OfficialToolCallTree,
+  atomicEntry,
+  cordisDeepSelect,
+  cordisDetailEntry,
+  cordisInject,
+  cordisRunEntry,
+  cordisStore,
+  findElement,
+  findElements,
+  jsx,
+  materialize,
+  officialHeaderEntry,
+  officialParentInject,
+  officialToolviewEntries,
+  officialViewEntry,
+  registeredPlugin,
+  textOf,
+  useOperationFoldingDefinition,
+} from "./operation-folding-harness.mjs"
+import {
+  PrototypeChatNodeStore,
+  assistantNode,
+  ownerFor,
+  passiveNode,
+  running,
+  settled,
+  snapshotFor,
+  toolNode,
+} from "./operation-folding-fixtures.mjs"
 
 const expect = (condition, message) => {
   if (!condition) throw new Error(message)
@@ -8,24 +40,6 @@ const expect = (condition, message) => {
 
 const clientPath = new URL("../Plugins/dsd-pancake-operation-folding/lib/client.js", import.meta.url)
 const clientURL = pathToFileURL(clientPath.pathname)
-const packagePath = new URL("../Plugins/dsd-pancake-operation-folding/package.json", import.meta.url)
-const patchPath = new URL("../Plugins/dsd-pancake-operation-folding/cordis.patch.yml", import.meta.url)
-const mainPath = new URL("../Plugins/dsd-pancake-operation-folding/lib/index.js", import.meta.url)
-const packageSource = await readFile(packagePath, "utf8")
-const packageManifest = JSON.parse(packageSource)
-const patchManifest = JSON.parse(execFileSync(
-  "/usr/bin/ruby",
-  [
-    "--disable=gems",
-    "-rjson",
-    "-ryaml",
-    "-e",
-    "print JSON.generate(YAML.safe_load(File.read(ARGV.fetch(0)), [], [], false))",
-    fileURLToPath(patchPath),
-  ],
-  { encoding: "utf8" },
-))
-const mainModule = await import(`${pathToFileURL(fileURLToPath(mainPath)).href}?main=${String(Date.now())}`)
 
 let definition
 globalThis.window = {
@@ -42,701 +56,7 @@ expect(
   definition.id === "@dsd-pancake/dsh-desktop-operation-folding",
   "操作折叠插件注册了错误的 client module id",
 )
-
-const react = {
-  useMemo(factory) {
-    return factory()
-  },
-  useSyncExternalStore(_subscribe, getSnapshot) {
-    return getSnapshot()
-  },
-}
-const Fragment = Symbol("Fragment")
-const jsx = (type, props, key) => ({ type, props: props ?? {}, key })
-const jsxs = jsx
-const requireForTest = (name) => {
-  if (name === "react") return react
-  if (name === "react/jsx-runtime") return { Fragment, jsx, jsxs }
-  throw new Error(`操作折叠插件请求了未知依赖：${name}`)
-}
-
-const isElement = (value) => typeof value === "object" && value !== null && "type" in value
-const materialize = (value) => {
-  if (Array.isArray(value)) return value.map(materialize)
-  if (!isElement(value)) return value
-  if (typeof value.type === "function") return materialize(value.type(value.props))
-  if (
-    typeof value.type === "object"
-    && value.type !== null
-    && typeof value.type.type === "function"
-  ) {
-    return materialize(value.type.type(value.props))
-  }
-  const children = value.props?.children
-  return {
-    ...value,
-    props: {
-      ...value.props,
-      ...(children === undefined ? {} : { children: materialize(children) }),
-    },
-  }
-}
-
-const childrenOf = (element) => {
-  const children = element?.props?.children
-  if (children === undefined || children === null) return []
-  return Array.isArray(children) ? children : [children]
-}
-const findElement = (element, predicate) => {
-  if (element === undefined || element === null || typeof element !== "object") return undefined
-  if (predicate(element)) return element
-  for (const child of childrenOf(element)) {
-    const found = findElement(child, predicate)
-    if (found !== undefined) return found
-  }
-  return undefined
-}
-const textOf = (element) => {
-  if (element === undefined || element === null || element === false) return ""
-  if (typeof element === "string" || typeof element === "number") return String(element)
-  if (Array.isArray(element)) return element.map(textOf).join("")
-  return childrenOf(element).map(textOf).join("")
-}
-
-const callName = (block) => block.kind === "tool-result" ? block.call.name : block.name
-const officialParentInject = () => ({
-  useHostDescription(selector) {
-    return selector({ home: "/Users/test" })
-  },
-})
-const OfficialToolCallTree = (props) => {
-  const home = props.useHostDescription((description) => description?.home)
-  const renderBranch = (block) => {
-    const owner = {
-      block,
-      callId: block.callId,
-      cwd: props.cwd,
-      home,
-      inspect: () => props.inspectCall(block.callId),
-      openFile: props.openFile,
-      toolName: callName(block),
-    }
-    return jsxs("official-tool-branch", {
-      "data-chat-call-id": block.callId,
-      "data-selected": block.callId === props.selectedCallId || undefined,
-      children: [
-        props.renderSlot("tool.call.toolview", owner, {
-          entryKey: owner.toolName,
-          fallback: jsx("official-generic-tool-card", {
-            "data-official-generic": owner.toolName,
-            callId: owner.callId,
-          }),
-        }),
-        block.subCalls.map((child) => renderBranch(child)),
-      ],
-    })
-  }
-  return jsx("official-tool-tree", {
-    "data-official-parent": "",
-    children: renderBranch(props.node.data.root),
-  })
-}
-const officialParentEntry = {
-  component: OfficialToolCallTree,
-  options: { key: "tool-call", priority: 0 },
-  locale: "conversation",
-  inject: officialParentInject,
-  children: {
-    "tool.call.toolview": { kind: "keyed", scope: "session" },
-  },
-}
-
-const OfficialChatView = (props) => {
-  const order = props.useSession((state) => state.chat.order)
-  const nodes = props.useSession((state) => state.chat.nodes)
-  return jsx("official-chat-view", {
-    "data-official-order": order.join(","),
-    "data-order-reference": order,
-    children: order.map((nodeKey) => {
-      const node = nodes.get(nodeKey)
-      return jsx("official-flow-item", {
-        "data-flow-key": nodeKey,
-        children: props.renderSlot("conversation.chat.node", {
-          cwd: props.cwd,
-          fileMentions: props.fileMentions,
-          forkAt: props.forkAt,
-          inspectCall: props.inspectCall,
-          node,
-          openFile: props.openFile,
-          renderMessageImages: props.renderMessageImages,
-          sessionId: props.sessionId,
-          useSession: props.useSession,
-        }, {
-          entryKey: node.kind,
-        }),
-      }, nodeKey)
-    }),
-  })
-}
-const officialViewEntry = {
-  component: OfficialChatView,
-  options: { id: "chat", order: 0, priority: 0, label: "对话" },
-  locale: "conversation",
-  inject: () => ({}),
-  children: {
-    "conversation.chat.node": { kind: "keyed", scope: "session" },
-    "conversation.message.images": { kind: "single", scope: "session" },
-  },
-}
-const OfficialHeader = (props) => jsx("official-header", {
-  "data-header-tabs": props.views.list().map((view) => view.id).join(","),
-  "data-header-labels": props.views.list().map((view) => view.label).join(","),
-})
-const officialHeaderEntry = {
-  component: OfficialHeader,
-  options: { priority: 0 },
-  locale: "conversation",
-  inject: () => ({}),
-  children: {
-    "conversation.session.header.actions": { kind: "list", scope: "session" },
-  },
-}
-
-const atomicEntry = (key, fields = {}) => ({
-  component(props) {
-    return jsx("official-tool-card", {
-      "data-official-tool": key,
-      callId: props.callId,
-      children: key,
-    })
-  },
-  options: { key, priority: 0 },
-  locale: "conversation",
-  ...fields,
-})
-
-const cordisDeepSelect = (owner) => ({ callId: owner.callId })
-const cordisDeepEntry = {
-  component(props) {
-    return jsx("official-cordis-deep", {
-      "data-cordis-deep": props.matched.callId,
-      children: "deep",
-    })
-  },
-  options: { priority: 0 },
-  select: cordisDeepSelect,
-}
-const cordisDetailEntry = {
-  component(props) {
-    return jsx("official-cordis-detail", {
-      "data-cordis-detail": props.callId,
-      children: props.renderSlotChain("cordis.run.deep", { callId: props.callId }),
-    })
-  },
-  options: { key: "detail", priority: 0 },
-  children: {
-    "cordis.run.deep": { kind: "chain", scope: "session" },
-  },
-}
-const cordisInject = () => ({ injectedCordisValue: "native-inject" })
-const cordisStore = { create() {} }
-const cordisRunEntry = atomicEntry("cordis_run", {
-  component(props) {
-    return jsx("official-cordis-run", {
-      "data-official-tool": "cordis_run",
-      "data-injected-value": props.injectedCordisValue,
-      callId: props.callId,
-      children: props.renderSlot("cordis.run.detail", { callId: props.callId }, {
-        entryKey: "detail",
-        fallback: jsx("cordis-detail-fallback", {}),
-      }),
-    })
-  },
-  children: {
-    "cordis.run.detail": { kind: "keyed", scope: "session" },
-  },
-  inject: cordisInject,
-  locale: "cordis",
-  store: cordisStore,
-})
-const memoLikeComponent = {
-  $$typeof: Symbol("react.memo"),
-  type(props) {
-    return jsx("official-memo-card", { callId: props.callId })
-  },
-}
-const officialToolviewEntries = [
-  "bash",
-  "read",
-  "grep",
-  "glob",
-  "write",
-  "edit",
-  "web_fetch",
-  "web_search",
-  "ask_user_question",
-  "todo_write",
-].map((key) => atomicEntry(key)).concat(
-  cordisRunEntry,
-  {
-    component: memoLikeComponent,
-    options: { key: "memo_like", priority: 0 },
-  },
-)
-
-const defaultSourceSlots = () => new Map([
-  ["conversation.view", [officialViewEntry]],
-  ["conversation.session.header", [officialHeaderEntry]],
-  ["conversation.chat.node", [officialParentEntry]],
-  ["tool.call.toolview", officialToolviewEntries],
-  ["cordis.run.detail", [cordisDetailEntry]],
-  ["cordis.run.deep", [cordisDeepEntry]],
-])
-const defaultSpecs = () => new Map([
-  ["conversation.view", { kind: "list", scope: "session" }],
-  ["conversation.session.header", { kind: "single", scope: "session" }],
-  ["conversation.chat.node", { kind: "keyed", scope: "session" }],
-  ["conversation.message.images", { kind: "single", scope: "session" }],
-  ["conversation.session.header.actions", { kind: "list", scope: "session" }],
-  ["tool.call.toolview", { kind: "keyed", scope: "session" }],
-  ["cordis.run.detail", { kind: "keyed", scope: "session" }],
-  ["cordis.run.deep", { kind: "chain", scope: "session" }],
-])
-
-const registeredPlugin = (options = {}) => {
-  const plugin = definition.factory(requireForTest)
-  const specs = options.specs ?? defaultSpecs()
-  const configuredSourceSlots = options.sourceSlots === undefined
-    ? defaultSourceSlots()
-    : new Map([...defaultSourceSlots(), ...options.sourceSlots])
-  const cloneSourceEntries = (entries) => entries.map((entry) => ({
-    ...entry,
-    abdicated: false,
-    options: { ...entry.options },
-  }))
-  const sourceSlots = new Map([...configuredSourceSlots].map(([name, entries]) => (
-    [name, cloneSourceEntries(entries)]
-  )))
-  const sourceEntrySlots = new Map()
-  for (const [name, entries] of sourceSlots) {
-    for (const entry of entries) sourceEntrySlots.set(entry, name)
-  }
-  const declarations = new Map([...specs].map(([name, spec]) => [name, { owner: "official", spec }]))
-  const liveEntries = new Map()
-  const registrations = []
-  const registrationLog = []
-  const disposalLog = []
-  const slotDispatches = []
-  const jsxDelegations = []
-  const injectedSlots = []
-  const subscribers = new Map()
-  const entryErrorListeners = new Set()
-  const dirtySlots = new Set()
-  const notificationCallbackCounts = new Map()
-  let mutationFlushScheduled = false
-  let topDispose
-
-  const notifyMutation = (name) => {
-    dirtySlots.add(name)
-    if (mutationFlushScheduled) return
-    mutationFlushScheduled = true
-    queueMicrotask(() => {
-      mutationFlushScheduled = false
-      const dirty = [...dirtySlots]
-      dirtySlots.clear()
-      for (const slot of dirty) {
-        for (const callback of [...(subscribers.get(slot) ?? [])]) {
-          notificationCallbackCounts.set(
-            slot,
-            (notificationCallbackCounts.get(slot) ?? 0) + 1,
-          )
-          callback()
-        }
-      }
-    })
-  }
-
-  const rows = (name) => {
-    let entries = liveEntries.get(name)
-    if (entries === undefined) {
-      entries = []
-      liveEntries.set(name, entries)
-    }
-    return entries
-  }
-  const configOf = (record) => record.config ?? record.options
-  const priority = (record) => configOf(record).priority ?? 0
-  const order = (record) => configOf(record).order ?? 0
-  const activeEntries = (name) => {
-    const spec = declarations.get(name)?.spec
-    return [
-      ...(sourceSlots.get(name) ?? []),
-      ...rows(name).filter((entry) => !entry.disposed),
-    ].sort(spec?.kind === "list"
-      ? (left, right) => priority(left) - priority(right) || order(left) - order(right)
-      : (left, right) => priority(left) - priority(right))
-  }
-  const isActiveEntry = (entry) => {
-    if (entry?.abdicated === true || entry?.disposed === true) return false
-    if (sourceEntrySlots.has(entry)) return (sourceSlots.get(sourceEntrySlots.get(entry)) ?? []).includes(entry)
-    return [...liveEntries.values()].some((entries) => entries.includes(entry))
-  }
-  const cellConflict = (record, config) => {
-    const spec = declarations.get(config.name)?.spec
-    const existing = configOf(record)
-    if (spec?.kind === "keyed") {
-      return existing.key === config.key && priority(record) === (config.priority ?? 0)
-    }
-    if (spec?.kind === "single") return priority(record) === (config.priority ?? 0)
-    if (spec?.kind === "list") {
-      return existing.id === config.id && priority(record) === (config.priority ?? 0)
-    }
-    return false
-  }
-  const removeRecord = (record) => {
-    const entries = rows(record.config.name)
-    const index = entries.indexOf(record)
-    if (index >= 0) entries.splice(index, 1)
-  }
-  const register = (config, component) => {
-    if (!declarations.has(config.name)) throw new Error(`slot not declared: ${config.name}`)
-    if (options.registerFailure?.(config, component) === true) {
-      throw new Error(`register failure: ${config.name}:${config.key ?? ""}`)
-    }
-    // SlotCore 的 raw ledger 即使 entry 已 abdicate 仍保留 cell；duplicate
-    // 校验因此必须覆盖 source raw entries，而不只是当前 live winner。
-    if (activeEntries(config.name).some((record) => cellConflict(record, config))) {
-      throw new Error(`duplicate cell: ${config.name}:${config.key ?? ""}:${String(config.priority ?? 0)}`)
-    }
-    const childEntries = Object.entries(config.children ?? {})
-    for (const [childName] of childEntries) {
-      if (declarations.has(childName)) throw new Error(`duplicate child declaration: ${childName}`)
-    }
-    let disposed = false
-    const record = {
-      abdicated: false,
-      component,
-      config,
-      options: config,
-      children: config.children,
-      inject: config.inject,
-      locale: config.locale,
-      select: config.select,
-      store: config.store,
-      get disposed() { return disposed },
-    }
-    rows(config.name).push(record)
-    registrations.push(record)
-    registrationLog.push(`register:${config.name}:${config.key ?? ""}`)
-    for (const [childName, spec] of childEntries) declarations.set(childName, { owner: record, spec })
-    notifyMutation(config.name)
-    for (const [childName] of childEntries) notifyMutation(childName)
-
-    return () => {
-      if (disposed) return
-      for (const [childName] of childEntries) {
-        if (rows(childName).some((entry) => !entry.disposed)) {
-          throw new Error(`child slot still occupied: ${childName}`)
-        }
-      }
-      disposed = true
-      removeRecord(record)
-      for (const [childName] of childEntries) {
-        if (declarations.get(childName)?.owner === record) declarations.delete(childName)
-      }
-      disposalLog.push(`${config.name}:${config.key ?? ""}`)
-      registrationLog.push(`dispose:${config.name}:${config.key ?? ""}`)
-      notifyMutation(config.name)
-      for (const [childName] of childEntries) notifyMutation(childName)
-      if (options.disposalFailure?.(config) === true) {
-        throw new Error(`dispose failure: ${config.name}:${config.key ?? ""}`)
-      }
-    }
-  }
-
-  const slots = {
-    inject(name, callback) {
-      injectedSlots.push(name)
-      const effect = callback()
-      let disposed = false
-      const dispose = () => {
-        if (disposed) return
-        disposed = true
-        if (typeof effect === "function") effect()
-      }
-      if (name === "conversation.view" && topDispose === undefined) topDispose = dispose
-      return dispose
-    },
-    spec(name) {
-      return declarations.get(name)?.spec
-    },
-    register,
-    entries(name) {
-      return activeEntries(name)
-    },
-    entriesOfSlot(name) {
-      const entries = activeEntries(name).filter(isActiveEntry)
-      const spec = declarations.get(name)?.spec
-      if (spec?.kind === "chain") return entries
-      const winners = []
-      const cells = new Set()
-      for (const entry of entries) {
-        const config = configOf(entry)
-        const cell = spec?.kind === "keyed"
-          ? config.key
-          : spec?.kind === "list"
-            ? config.id
-            : "single"
-        if (cells.has(cell)) continue
-        cells.add(cell)
-        winners.push(entry)
-      }
-      return winners
-    },
-    subscribe(name, callback) {
-      let listeners = subscribers.get(name)
-      if (listeners === undefined) {
-        listeners = new Set()
-        subscribers.set(name, listeners)
-      }
-      listeners.add(callback)
-      let disposed = false
-      return () => {
-        if (disposed) return
-        disposed = true
-        listeners.delete(callback)
-        if (options.unsubscribeFailure === true) throw new Error("unsubscribe failure")
-      }
-    },
-    onEntryError(callback) {
-      entryErrorListeners.add(callback)
-      return () => {
-        entryErrorListeners.delete(callback)
-      }
-    },
-  }
-
-  plugin.apply({ slots })
-
-  const winner = (name, opts) => {
-    const spec = declarations.get(name)?.spec
-    const entries = slots.entriesOfSlot(name)
-    if (spec?.kind === "keyed") return entries.find((entry) => configOf(entry).key === opts?.entryKey)
-    if (spec?.kind === "single") return entries[0]
-    if (spec?.kind === "list") return entries.find((entry) => (
-      opts?.only === undefined || configOf(entry).id === opts.only
-    ))
-    if (spec?.kind === "chain") {
-      for (const entry of entries) {
-        const matched = configOf(entry).select?.(opts.owner)
-        if (matched !== null) return { entry, matched }
-      }
-    }
-    return undefined
-  }
-  const renderFallback = (fallback) => materialize(fallback ?? null)
-  const renderPublic = (name, owner, opts = {}) => {
-    const spec = declarations.get(name)?.spec
-    const selected = spec?.kind === "chain" ? winner(name, { owner }) : winner(name, opts)
-    const record = spec?.kind === "chain" ? selected?.entry : selected
-    if (record === undefined) return renderFallback(opts.fallback)
-    slotDispatches.push({ name, owner, options: opts, record })
-    const config = configOf(record)
-    const boundRenderSlot = (childName, childOwner, childOptions) => {
-      const childSpec = config.children?.[childName]
-      if (childSpec === undefined) throw new Error(`entry does not own child slot: ${childName}`)
-      if (childSpec.kind === "chain") throw new Error(`child slot requires renderSlotChain: ${childName}`)
-      return renderPublic(childName, childOwner, childOptions)
-    }
-    const boundRenderSlotChain = (childName, childOwner, childOptions) => {
-      const childSpec = config.children?.[childName]
-      if (childSpec === undefined) throw new Error(`entry does not own child slot: ${childName}`)
-      if (childSpec.kind !== "chain") throw new Error(`child slot is not a chain: ${childName}`)
-      return renderPublic(childName, childOwner, childOptions)
-    }
-    const injected = typeof config.inject === "function" ? config.inject() : {}
-    const componentProps = {
-      ...(config.children === undefined ? {} : {
-        renderSlot: boundRenderSlot,
-        ...(Object.values(config.children).some((entry) => entry.kind === "chain")
-          ? { renderSlotChain: boundRenderSlotChain }
-          : {}),
-      }),
-      ...(config.locale === undefined ? {} : { t: (key) => key }),
-      ...injected,
-      ...owner,
-      ...(spec?.kind === "chain" ? { matched: selected.matched } : {}),
-    }
-    const delegated = record.component(componentProps)
-    jsxDelegations.push({ record, delegatedType: delegated?.type })
-    return materialize(delegated)
-  }
-
-  const pluginParents = () => registrations.filter((entry) => (
-    !entry.disposed
-    && entry.config.name.startsWith("dsd-pancake.operation.alias")
-    && entry.config.key === "tool-call"
-  ))
-  const invokeParent = (owner, raw) => {
-    const record = pluginParents().sort((a, b) => priority(a) - priority(b))[0]
-    if (record === undefined) return undefined
-    const result = renderPublic(record.config.name, owner, { entryKey: "tool-call" })
-    return raw ? record.component({
-      renderSlot: (name, childOwner, childOptions) => renderPublic(name, childOwner, childOptions),
-      t: (key) => key,
-      ...(typeof record.config.inject === "function" ? record.config.inject() : {}),
-      ...owner,
-    }) : result
-  }
-
-  return {
-    declarations,
-    disposalLog,
-    injectedSlots,
-    jsxDelegations,
-    plugin,
-    registrations,
-    registrationLog,
-    slotAPIKeys: Object.keys(slots),
-    slotDispatches,
-    registerForTest(config, component) {
-      return register(config, component)
-    },
-    subscribeForTest(name, callback) {
-      return slots.subscribe(name, callback)
-    },
-    rawEntriesForTest(name) {
-      return slots.entries(name)
-    },
-    winningEntriesForTest(name) {
-      return slots.entriesOfSlot(name)
-    },
-    notificationCallbackCount(name) {
-      return notificationCallbackCounts.get(name) ?? 0
-    },
-    async flushMutations() {
-      while (mutationFlushScheduled || dirtySlots.size > 0) await Promise.resolve()
-    },
-    get activeSubscriptionCount() {
-      return [...subscribers.values()].reduce((count, listeners) => count + listeners.size, 0)
-    },
-    get parent() {
-      return pluginParents()[0]
-    },
-    activeRecords(name) {
-      return rows(name).filter((entry) => !entry.disposed)
-    },
-    dispose() {
-      topDispose?.()
-    },
-    renderParent(owner) {
-      return invokeParent(owner, false)
-    },
-    renderParentRaw(owner) {
-      return invokeParent(owner, true)
-    },
-    renderView(owner) {
-      return renderPublic("conversation.view", owner, { only: "chat" })
-    },
-    renderHeader(owner) {
-      return renderPublic("conversation.session.header", owner)
-    },
-    reapply() {
-      plugin.apply({ slots })
-    },
-    setSources(name, entries) {
-      const previous = sourceSlots.get(name) ?? []
-      for (const entry of previous) sourceEntrySlots.delete(entry)
-      const next = cloneSourceEntries(entries)
-      sourceSlots.set(name, next)
-      for (const entry of next) sourceEntrySlots.set(entry, name)
-      notifyMutation(name)
-    },
-    triggerEntryError(record, info = { abdicated: true }) {
-      const slot = sourceEntrySlots.get(record) ?? record.config?.name
-      if (info.abdicated === true) {
-        if (record.abdicated === true) return
-        record.abdicated = true
-        notifyMutation(slot)
-      }
-      for (const callback of [...entryErrorListeners]) {
-        callback(slot, record, new Error("render failure"), info)
-      }
-    },
-    sourceRecord(name, component) {
-      return (sourceSlots.get(name) ?? []).find((entry) => entry.component === component)
-    },
-  }
-}
-
-const running = (callId, name, args, time, children = []) => ({
-  callId,
-  name,
-  argsRaw: JSON.stringify(args),
-  time,
-  subCalls: children,
-})
-const settled = (callId, name, args, time, isError = false, children = []) => ({
-  kind: "tool-result",
-  seq: time,
-  time,
-  callId,
-  call: { name, argsRaw: JSON.stringify(args) },
-  callTime: time - 1,
-  content: [],
-  isError,
-  error: isError ? { name: "Error", code: "test_failure" } : undefined,
-  callView: null,
-  resultView: null,
-  subCalls: children,
-})
-const toolNode = (key, turn, root, anchorSeq = 0) => ({
-  key,
-  kind: "tool-call",
-  id: root.callId,
-  target: "chat",
-  anchorSeq,
-  visibility: "visible",
-  location: {
-    kind: "step",
-    turn: { turn },
-    step: { step: 1 },
-  },
-  data: { root },
-})
-const snapshotFor = (nodesByTurn) => {
-  const nodes = new Map()
-  const turns = new Map()
-  const order = []
-  for (const [turn, entries] of nodesByTurn) {
-    const keys = []
-    for (const node of entries) {
-      nodes.set(node.key, node)
-      keys.push(node.key)
-      order.push(node.key)
-    }
-    turns.set(turn, keys)
-  }
-  return {
-    chat: {
-      order,
-      nodes,
-      locations: { getTurn: (turn) => turns.get(turn) ?? [] },
-    },
-  }
-}
-const ownerFor = (node, snapshot, sessionId, overrides = {}) => ({
-  node,
-  sessionId,
-  selectedCallId: undefined,
-  cwd: "/tmp/project",
-  openFile() {},
-  inspectCall() {},
-  useSession(selector) {
-    return selector(snapshot)
-  },
-  ...overrides,
-})
+useOperationFoldingDefinition(definition)
 
 const first = registeredPlugin()
 expect(first.plugin.inject?.[0] === "slots", "操作折叠插件没有声明 slots 注入")
@@ -1064,6 +384,411 @@ expect(
   "再次点击后没有恢复 order 投影折叠",
 )
 
+const thinkPlugin = registeredPlugin()
+const thinkOld = assistantNode("think-old", 40, [
+  { kind: "reasoning", text: "旧推理开头\n旧推理结尾" },
+], "settled", 0)
+const thinkToolA = toolNode(
+  "think-tool-a",
+  40,
+  running("think-call-a", "read", { path: "Sources/A.swift" }, 1),
+  1,
+)
+const thinkMixed = assistantNode("think-mixed", 40, [
+  { kind: "text", text: "保留正文" },
+  { kind: "reasoning", text: "同一步早期 reasoning" },
+  { kind: "reasoning", text: "流式推理开头\n  最新有效内容  \n" },
+  { kind: "image", attachment: { id: "image-a" } },
+  { kind: "other", block: { future: true } },
+  { kind: "tool-call", callId: "inline-tool", name: "read", argsRaw: "{}" },
+], "running", 2)
+const thinkContext = passiveNode("think-context", "context", 40, 3)
+const thinkToolB = toolNode(
+  "think-tool-b",
+  40,
+  settled("think-call-b", "bash", { command: "swift test" }, 4),
+  4,
+)
+const thinkEmptyTail = assistantNode("think-empty-tail", 40, [
+  { kind: "reasoning", text: " \n\t " },
+], "running", 5)
+const thinkRetry = passiveNode("think-retry", "model-retry", 40, 6)
+const thinkError = passiveNode("think-error", "turn-error", 40, 7)
+const thinkHidden = {
+  ...assistantNode("think-hidden", 40, [
+    { kind: "reasoning", text: "隐藏节点不应成为最新" },
+  ], "settled", 8),
+  visibility: "hidden",
+}
+let thinkSnapshot = snapshotFor([[40, [
+  thinkOld,
+  thinkToolA,
+  thinkMixed,
+  thinkContext,
+  thinkToolB,
+  thinkEmptyTail,
+  thinkRetry,
+  thinkError,
+  thinkHidden,
+]]])
+const rawThinkOrder = thinkSnapshot.chat.order
+const rawThinkNodes = thinkSnapshot.chat.nodes
+const rawMixedBlocks = thinkMixed.data.blocks
+
+let thinkView = thinkPlugin.renderView(ownerFor(thinkOld, thinkSnapshot, "think-session"))
+let thinkOfficialView = findElement(
+  thinkView,
+  (element) => element.props?.["data-official-order"] !== undefined,
+)
+expect(
+  thinkOfficialView?.props?.["data-official-order"]
+    === "think-tool-a,think-mixed,think-context,think-retry,think-error,think-hidden",
+  "Think 与工具折叠没有共同移除旧 reasoning、空流式节点和第二个折叠工具",
+)
+expect(
+  thinkSnapshot.chat.order === rawThinkOrder
+    && thinkSnapshot.chat.nodes === rawThinkNodes
+    && thinkMixed.data.blocks === rawMixedBlocks
+    && thinkMixed.data.blocks.some((block) => block.kind === "reasoning"),
+  "Think 投影修改了原始 snapshot、node store 或 blocks",
+)
+
+const prototypeThinkPlugin = registeredPlugin()
+const prototypeStore = new PrototypeChatNodeStore(rawThinkNodes.values())
+const prototypeSnapshot = {
+  ...thinkSnapshot,
+  chat: {
+    ...thinkSnapshot.chat,
+    nodes: prototypeStore,
+  },
+}
+expect(
+  !Object.hasOwn(prototypeStore, "get") && !Object.hasOwn(prototypeStore, "values"),
+  "原型 node store 夹具错误地把 get/values 建成了实例字段",
+)
+let prototypeThinkView = prototypeThinkPlugin.renderView(ownerFor(
+  thinkOld,
+  prototypeSnapshot,
+  "prototype-think-session",
+))
+let prototypeOfficialView = findElement(
+  prototypeThinkView,
+  (element) => element.props?.["data-official-order"] !== undefined,
+)
+expect(
+  prototypeOfficialView?.props?.["data-official-order"]
+    === "think-tool-a,think-mixed,think-context,think-retry,think-error,think-hidden"
+    && prototypeOfficialView.props["data-value-block-kinds"].includes(
+      "think-mixed:text+image+other+tool-call",
+    )
+    && !prototypeOfficialView.props["data-value-block-kinds"].includes(
+      "think-mixed:text+reasoning",
+    ),
+  "只读 Think overlay 没有保留原型 node store 的 get/values 合约或正确投影 values()",
+)
+expect(
+  prototypeStore.get("think-mixed") === thinkMixed
+    && prototypeStore.values().includes(thinkOld)
+    && thinkMixed.data.blocks === rawMixedBlocks,
+  "只读 Think overlay 修改了原型 node store 或原始节点",
+)
+findElement(
+  prototypeThinkView,
+  (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+).props.onClick()
+prototypeThinkView = prototypeThinkPlugin.renderView(ownerFor(
+  thinkOld,
+  prototypeSnapshot,
+  "prototype-think-session",
+))
+prototypeOfficialView = findElement(
+  prototypeThinkView,
+  (element) => element.props?.["data-official-order"] !== undefined,
+)
+expect(
+  prototypeOfficialView.props["data-official-order"].includes("think-tool-b")
+    && !prototypeOfficialView.props["data-official-order"].includes("think-old")
+    && prototypeOfficialView.props["data-value-block-kinds"].includes(
+      "think-mixed:text+image+other+tool-call",
+    )
+    && !prototypeOfficialView.props["data-value-block-kinds"].includes(
+      "think-mixed:text+reasoning",
+    ),
+  "工具展开时没有继续应用原型 node store 上的 Think 投影",
+)
+let thinkSummaries = findElements(
+  thinkView,
+  (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+)
+expect(thinkSummaries.length === 1, "同一 turn 没有只保留一个 Think 摘要")
+let thinkSummary = thinkSummaries[0]
+expect(
+  thinkSummary.type === "button"
+    && thinkSummary.props.type === "button"
+    && thinkSummary.props["aria-expanded"] === false,
+  "Think 摘要没有使用支持 Enter/Space 的原生 button 或没有默认折叠",
+)
+expect(
+  thinkSummary.props["aria-label"] === "展开最新 Think：最新有效内容"
+    && textOf(thinkSummary).includes("Think·最新有效内容"),
+  "Think 摘要没有使用最后一个非空文本行或错误显示了数量",
+)
+expect(
+  findElement(thinkView, (element) => element.props?.["data-dsd-pancake-think-body"] === "")
+    === undefined,
+  "Think 默认折叠时仍渲染了全文",
+)
+const thinkSummaryFlow = findElements(thinkView, (element) => element.type === "official-flow-item")
+  .find((element) => findElement(
+    element,
+    (child) => child.props?.["data-dsd-pancake-think-summary"] === "",
+  ) !== undefined)
+const projectedMixed = findElements(
+  thinkSummaryFlow,
+  (element) => element.props?.["data-assistant-node"] === "think-mixed",
+)
+expect(
+  projectedMixed.map((element) => element.props["data-block-kinds"]).join(",")
+    === "text,image,other,tool-call",
+  "mixed assistant-step 没有只剔除 reasoning 并保留 text/image/unknown/tool-call",
+)
+expect(
+  findElement(thinkSummaryFlow, (element) => element.type === "official-text") !== undefined
+    && findElement(thinkSummaryFlow, (element) => element.type === "official-image") !== undefined
+    && findElement(thinkSummaryFlow, (element) => element.type === "official-unknown") !== undefined
+    && findElement(thinkSummaryFlow, (element) => element.type === "official-reasoning") === undefined,
+  "Think 投影丢失 mixed blocks 或把旧 reasoning 交回官方 renderer",
+)
+const mixedVisibleOrder = findElements(thinkSummaryFlow, (element) => (
+  element.type === "official-text"
+  || element.type === "official-image"
+  || element.type === "official-unknown"
+  || element.props?.["data-dsd-pancake-think-summary"] === ""
+)).map((element) => (
+  element.props?.["data-dsd-pancake-think-summary"] === "" ? "think" : element.type
+))
+expect(
+  mixedVisibleOrder.join(",") === "official-text,think,official-image,official-unknown",
+  "Think 摘要没有在最新 reasoning 的原位置就地替换，mixed block 可见顺序被改写",
+)
+expect(
+  thinkSummaryFlow?.props?.["data-flow-key"] === "think-mixed",
+  "Think 摘要没有锚定到当前最新的非空 reasoning 节点",
+)
+
+thinkSummary.props.onClick()
+thinkView = thinkPlugin.renderView(ownerFor(thinkOld, thinkSnapshot, "think-session"))
+thinkSummary = findElement(
+  thinkView,
+  (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+)
+expect(thinkSummary.props["aria-expanded"] === true, "点击 Think 摘要后没有展开")
+expect(
+  textOf(findElement(
+    thinkView,
+    (element) => element.props?.["data-dsd-pancake-think-body"] === "",
+  )) === "流式推理开头\n  最新有效内容  \n",
+  "Think 展开后没有显示最新 reasoning 的完整原文",
+)
+expect(
+  findElement(
+    thinkPlugin.renderView(ownerFor(thinkOld, thinkSnapshot, "think-session-other")),
+    (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+  ).props["aria-expanded"] === false,
+  "Think 展开状态污染了其他 session",
+)
+
+const thinkLatest = assistantNode("think-latest", 40, [
+  { kind: "reasoning", text: "完成阶段\n最新落点" },
+], "settled", 9)
+const thinkLatestEmpty = assistantNode("think-latest-empty", 40, [
+  { kind: "reasoning", text: "\n  " },
+], "settled", 10)
+thinkSnapshot = snapshotFor([[40, [
+  thinkOld,
+  thinkToolA,
+  thinkMixed,
+  thinkContext,
+  thinkToolB,
+  thinkEmptyTail,
+  thinkRetry,
+  thinkError,
+  thinkHidden,
+  thinkLatest,
+  thinkLatestEmpty,
+]]])
+thinkView = thinkPlugin.renderView(ownerFor(thinkLatest, thinkSnapshot, "think-session"))
+thinkSummaries = findElements(
+  thinkView,
+  (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+)
+expect(
+  thinkSummaries.length === 1
+    && thinkSummaries[0].props["aria-expanded"] === true
+    && thinkSummaries[0].props["aria-label"] === "收起最新 Think：最新落点",
+  "新 reasoning 到达后没有移动唯一摘要或保留 session+turn 展开态",
+)
+const movedThinkFlow = findElements(thinkView, (element) => element.type === "official-flow-item")
+  .find((element) => findElement(
+    element,
+    (child) => child.props?.["data-dsd-pancake-think-summary"] === "",
+  ) !== undefined)
+expect(
+  movedThinkFlow?.props?.["data-flow-key"] === "think-latest",
+  "尾部空占位覆盖了最近的非空 Think 或摘要没有移动到新节点",
+)
+expect(
+  textOf(findElement(
+    thinkView,
+    (element) => element.props?.["data-dsd-pancake-think-body"] === "",
+  )) === "完成阶段\n最新落点",
+  "锚点移动后展开正文没有更新到最新 reasoning",
+)
+
+const toolSummaryWhileThinking = findElement(
+  thinkView,
+  (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+)
+toolSummaryWhileThinking.props.onClick()
+thinkView = thinkPlugin.renderView(ownerFor(thinkLatest, thinkSnapshot, "think-session"))
+thinkOfficialView = findElement(
+  thinkView,
+  (element) => element.props?.["data-official-order"] !== undefined,
+)
+expect(
+  thinkOfficialView.props["data-official-order"].includes("think-tool-b")
+    && !thinkOfficialView.props["data-official-order"].includes("think-old")
+    && !thinkOfficialView.props["data-official-order"].includes("think-empty-tail")
+    && !thinkOfficialView.props["data-official-order"].includes("think-latest-empty")
+    && findElements(
+      thinkView,
+      (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+    ).length === 1,
+  "工具展开恢复了旧 Think、空白节点或影响了 Think 唯一摘要",
+)
+
+const interruptedThink = assistantNode("think-interrupted", 41, [
+  { kind: "reasoning", text: "中断前分析\n中断前最后内容" },
+], "interrupted", 0)
+const interruptedSnapshot = snapshotFor([[41, [interruptedThink]]])
+const interruptedView = thinkPlugin.renderView(ownerFor(
+  interruptedThink,
+  interruptedSnapshot,
+  "think-session",
+))
+expect(
+  findElement(
+    interruptedView,
+    (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+  )?.props?.["aria-expanded"] === false
+    && findElement(interruptedView, (element) => element.type === "official-stopped") !== undefined,
+  "Think 展开态污染同 session 的其他 turn，或 interrupted 已停止标记被投影丢失",
+)
+
+// 展开状态只能跟随仍存活的 session/turn：turn 从 snapshot 消失时仅清理该
+// Think，工具的每会话偏好仍保留；session removed 与插件 shutdown 清空全部状态。
+const expansionLifecycle = registeredPlugin()
+const lifecycleThink = assistantNode("lifecycle-think", 60, [
+  { kind: "reasoning", text: "生命周期推理\n生命周期最新" },
+], "settled", 0)
+const lifecycleTool = toolNode(
+  "lifecycle-tool",
+  60,
+  running("lifecycle-call", "read", { path: "Sources/Lifecycle.swift" }, 1),
+  1,
+)
+const lifecycleSnapshot = snapshotFor([[60, [lifecycleThink, lifecycleTool]]])
+let lifecycleView = expansionLifecycle.renderView(ownerFor(
+  lifecycleThink,
+  lifecycleSnapshot,
+  "expansion-lifecycle-session",
+))
+findElement(
+  lifecycleView,
+  (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+).props.onClick()
+findElement(
+  lifecycleView,
+  (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+).props.onClick()
+
+const nextLifecycleTool = toolNode(
+  "lifecycle-tool-next",
+  61,
+  running("lifecycle-call-next", "bash", { command: "swift test" }, 2),
+  0,
+)
+const nextLifecycleSnapshot = snapshotFor([[61, [nextLifecycleTool]]])
+const nextLifecycleView = expansionLifecycle.renderView(ownerFor(
+  nextLifecycleTool,
+  nextLifecycleSnapshot,
+  "expansion-lifecycle-session",
+))
+expect(
+  findElement(
+    nextLifecycleView,
+    (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+  ).props["aria-expanded"] === true,
+  "turn 消失时错误清除了同一 session 的工具展开偏好",
+)
+lifecycleView = expansionLifecycle.renderView(ownerFor(
+  lifecycleThink,
+  lifecycleSnapshot,
+  "expansion-lifecycle-session",
+))
+expect(
+  findElement(
+    lifecycleView,
+    (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+  ).props["aria-expanded"] === false,
+  "已从 snapshot 消失的 turn 再出现时继承了陈旧 Think 展开状态",
+)
+
+expansionLifecycle.renderView(ownerFor(
+  lifecycleThink,
+  { ...lifecycleSnapshot, removed: true },
+  "expansion-lifecycle-session",
+))
+lifecycleView = expansionLifecycle.renderView(ownerFor(
+  lifecycleThink,
+  lifecycleSnapshot,
+  "expansion-lifecycle-session",
+))
+expect(
+  findElement(
+    lifecycleView,
+    (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+  ).props["aria-expanded"] === false,
+  "session removed 后仍继承陈旧工具展开状态",
+)
+findElement(
+  lifecycleView,
+  (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+).props.onClick()
+findElement(
+  lifecycleView,
+  (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+).props.onClick()
+expansionLifecycle.dispose()
+const afterExpansionShutdown = registeredPlugin()
+const afterShutdownView = afterExpansionShutdown.renderView(ownerFor(
+  lifecycleThink,
+  lifecycleSnapshot,
+  "expansion-lifecycle-session",
+))
+expect(
+  findElement(
+    afterShutdownView,
+    (element) => element.props?.["data-dsd-pancake-operation-summary"] === "",
+  ).props["aria-expanded"] === false
+    && findElement(
+      afterShutdownView,
+      (element) => element.props?.["data-dsd-pancake-think-summary"] === "",
+    ).props["aria-expanded"] === false,
+  "插件 shutdown 后仍保留工具或 Think 展开状态",
+)
+afterExpansionShutdown.dispose()
+
 const ThirdPartyChatView = (props) => jsx("third-party-chat-source", {
   children: jsx(OfficialChatView, props),
 })
@@ -1381,8 +1106,9 @@ const renderFailure = registeredPlugin({
 const failedMirror = renderFailure.registrations.find((entry) => (
   !entry.disposed
   && entry.config.name.startsWith("dsd-pancake.operation.alias")
-  && entry.config.key === "read"
+  && entry.config.key === "assistant-step"
 ))
+expect(failedMirror !== undefined, "没有为 assistant-step 注册 private alias renderer")
 renderFailure.triggerEntryError(failedMirror)
 expect(renderFailure.parent === undefined, "private alias render error 没有回滚 parent takeover")
 expect(renderFailure.activeSubscriptionCount === 0, "render error 后仍保留 source subscriptions")
@@ -1399,31 +1125,6 @@ renderFailure.reapply()
 expect(renderFailure.parent === undefined, "首次 entry error 后没有在本次 App 运行永久禁用")
 
 const source = await readFile(clientPath, "utf8")
-expect(
-  packageManifest.name === "@dsd-pancake/dsh-desktop-operation-folding",
-  "operation-folding package name 不正确",
-)
-expect(packageManifest.type === "module", "operation-folding package type 必须是 module")
-expect(packageManifest.main === "./lib/index.js", "operation-folding package main 不正确")
-expect(
-  packageManifest.exports?.["./client"] === "./lib/client.js",
-  "operation-folding package 缺少 ./client export",
-)
-expect(packageManifest.dsh?.client?.platform === "web", "operation-folding dsh client platform 不正确")
-expect(
-  JSON.stringify(packageManifest.dsh?.client?.inject) === JSON.stringify(["slots"]),
-  "operation-folding dsh client inject 必须精确为 ['slots']",
-)
-expect(
-  JSON.stringify(patchManifest) === JSON.stringify([{
-    insert: [{
-      id: "dsd-pancake-operation-folding",
-      name: "@dsd-pancake/dsh-desktop-operation-folding",
-    }],
-  }]),
-  "cordis.patch.yml 必须精确插入 operation-folding package id 与 name",
-)
-expect(typeof mainModule.apply === "function", "operation-folding package main 无法导入 apply")
 const forbiddenPatterns = [
   [/MutationObserver/, "DOM 变更监听"],
   [/querySelector/, "DOM selector"],
@@ -1436,10 +1137,7 @@ const forbiddenPatterns = [
 for (const [pattern, label] of forbiddenPatterns) {
   expect(!pattern.test(source), `操作折叠插件不应使用${label}`)
 }
-expect(source.includes("jsx(source.component, delegatedProps("), "source component 没有通过 JSX 委托")
 expect(!/source\.component\s*\(/.test(source), "source component 被直接函数调用")
 expect(!source.includes("ctx.slots.isLive"), "插件使用了 DSH 0.1.1-rc.2 未公开的 slots.isLive")
-expect(source.includes("ctx.slots.entriesOfSlot(slot).find"), "source winner 没有以公开 entriesOfSlot 为权威")
-expect(source.includes("ctx.slots.onEntryError("), "插件没有监听 private entry render error")
 
 console.log("operation-folding plugin verification passed")

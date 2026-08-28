@@ -60,8 +60,14 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         configuration.userContentController = userContentController
         // 默认 data store 是持久化存储。唯一的页面桥只读取布局宽度与已计算背景色，
         // 不读取文字、会话、Cookie，也不写入 DOM 或改变 DSH 功能。
-        configuration.websiteDataStore = .default()
-        precondition(configuration.websiteDataStore.isPersistent, "DSD Pancake 必须使用持久 WKWebsiteDataStore")
+        configuration.websiteDataStore = AppRuntimeConfiguration.current.usesPersistentWebDataStore
+            ? .default()
+            : .nonPersistent()
+        precondition(
+            configuration.websiteDataStore.isPersistent
+                == AppRuntimeConfiguration.current.usesPersistentWebDataStore,
+            "WebKit 数据存储必须与正式／隔离 Test App 身份一致"
+        )
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
 
@@ -291,10 +297,14 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         _ body: Any,
         frameInfo: WKFrameInfo
     ) async -> [String: Any]? {
-        guard notificationBridgeEnabled,
-              frameInfo.isMainFrame,
-              isLocalServiceOrigin(frameInfo.securityOrigin),
-              let action = DesktopNotificationBridge.decode(body) else {
+        guard let action = DesktopNotificationBridgeAdmission.decode(
+            body,
+            bridgeEnabled: notificationBridgeEnabled,
+            isMainFrame: frameInfo.isMainFrame,
+            originScheme: frameInfo.securityOrigin.protocol,
+            originHost: frameInfo.securityOrigin.host,
+            originPort: frameInfo.securityOrigin.port
+        ) else {
             return nil
         }
         return await notificationCoordinator.handle(action)
@@ -356,12 +366,6 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         showTransientNavigationMessage("已在默认浏览器打开你点击的外部链接。")
     }
 
-    private func isLocalServiceOrigin(_ origin: WKSecurityOrigin) -> Bool {
-        origin.protocol == LocalService.url.scheme
-            && origin.host == LocalService.host
-            && origin.port == LocalService.port
-    }
-
     private func showTransientNavigationMessage(_ text: String) {
         let notice = NavigationNotice(
             text: text,
@@ -398,17 +402,5 @@ final class WebContainer: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         withAnimation(.easeOut(duration: 0.18)) {
             navigationMessage = message
         }
-    }
-}
-
-struct WebContainerHost: NSViewRepresentable {
-    let container: WebContainer
-
-    func makeNSView(context: Context) -> WKWebView {
-        container.webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        // WebView 的导航和状态由 WebContainer 管理，更新时不替换实例。
     }
 }

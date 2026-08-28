@@ -48,7 +48,7 @@ for output_path in "$app_path" "$archive_path" "$metadata_path" "$dmg_path" "$ch
     fi
 done
 
-DSHD_OUTPUT_DIR="$output_dir" /bin/zsh "$script_dir/build-app.zsh"
+DSHD_TEST_MODE=0 DSHD_OUTPUT_DIR="$output_dir" /bin/zsh "$script_dir/build-app.zsh"
 /bin/zsh "$script_dir/build-dmg.zsh" "$app_path" "$dmg_path"
 /bin/zsh "$script_dir/verify-dmg.zsh" "$dmg_path"
 

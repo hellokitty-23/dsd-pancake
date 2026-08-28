@@ -1,4 +1,5 @@
 import AppKit
+import DSHDesktopCore
 
 /// 从网页仅同步出来的视觉表面：侧栏宽度、侧栏底色、主区域底色与分隔线颜色。
 /// 不包含网页文字、会话、账号或任何功能状态。
@@ -32,6 +33,12 @@ struct ChromeSurfaceStyle: Equatable {
 final class WindowChromeContainer: NSView {
     private let backdropView = WindowChromeBackdropView()
     private weak var hostedView: NSView?
+    private weak var updateIndicatorView: NSView?
+    private var chromeStyle: ChromeSurfaceStyle?
+
+    /// 更新浮层监听这一回调后，只重算自身 frame；网页和标题栏背景不经由它
+    /// 反向读取任何更新状态。
+    var onGeometryChange: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -62,8 +69,70 @@ final class WindowChromeContainer: NSView {
         ])
     }
 
+    func installUpdateIndicator(_ view: NSView) {
+        precondition(updateIndicatorView == nil, "更新入口只能安装一次")
+        updateIndicatorView = view
+        addSubview(view)
+        needsLayout = true
+    }
+
+    func installUpdateSurface(_ view: NSView) {
+        if view.superview !== self {
+            view.removeFromSuperview()
+            addSubview(view, positioned: .above, relativeTo: updateIndicatorView)
+        }
+    }
+
+    var updateLayout: UpdateOverlayLayout {
+        UpdateOverlayLayout.resolve(
+            totalWidth: bounds.width,
+            sidebarWidth: chromeStyle?.sidebarWidth,
+            minimumIndicatorCenterX: minimumIndicatorCenterX
+        )
+    }
+
+    override func layout() {
+        super.layout()
+        guard let indicator = updateIndicatorView else {
+            onGeometryChange?()
+            return
+        }
+        let geometry = updateLayout
+        let size = UpdateOverlayLayout.indicatorSize
+        indicator.frame = NSRect(
+            x: geometry.indicatorCenterX - size.width / 2,
+            y: titlebarCenterY - size.height / 2,
+            width: size.width,
+            height: size.height
+        ).integral
+        onGeometryChange?()
+    }
+
     func apply(style: ChromeSurfaceStyle?) {
+        chromeStyle = style
         backdropView.style = style
+        needsLayout = true
+    }
+
+    private var minimumIndicatorCenterX: CGFloat {
+        guard let window else { return 0 }
+        let trafficLights = [
+            window.standardWindowButton(.closeButton),
+            window.standardWindowButton(.miniaturizeButton),
+            window.standardWindowButton(.zoomButton),
+        ].compactMap { $0 }
+        let trailing = trafficLights.map { button in
+            button.convert(button.bounds, to: self).maxX
+        }.max() ?? 0
+        return trailing + 24
+    }
+
+    private var titlebarCenterY: CGFloat {
+        guard let window,
+              let closeButton = window.standardWindowButton(.closeButton) else {
+            return bounds.maxY - 14
+        }
+        return closeButton.convert(closeButton.bounds, to: self).midY
     }
 }
 

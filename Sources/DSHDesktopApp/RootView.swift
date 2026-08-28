@@ -19,18 +19,18 @@ struct RootView: View {
                     readyView
 
                 case .checking:
-                    progressView(title: "正在检查本机 127.0.0.1:3080", detail: "不会修改已存在的服务。")
+                    progressView(title: "正在检查本机 \(LocalService.hostAndPort)", detail: "不会修改已存在的服务。")
                 case .locating:
                     progressView(title: "正在定位 dsh", detail: "仅检查已安装的可执行文件。")
                 case .starting:
                     progressView(title: "正在启动本次 DSH 服务", detail: "服务将作为受控子进程运行。")
                 case .waitingForService:
-                    progressView(title: "正在等待 DSH 就绪", detail: "地址固定为 http://127.0.0.1:3080/。")
+                    progressView(title: "正在等待 DSH 就绪", detail: "地址固定为 \(LocalService.url.absoluteString)。")
 
                 case let .unknownExistingService(reason):
                     decisionView(
                         title: "检测到无法确认身份的本机服务",
-                        detail: "127.0.0.1:3080 已有可访问响应（\(unknownReasonText(reason))）。它可能不是 DSH。确认后才会在 WebView 中打开；拒绝不会停止或修改它。",
+                        detail: "\(LocalService.hostAndPort) 已有可访问响应（\(unknownReasonText(reason))）。它可能不是 DSH。确认后才会在 WebView 中打开；拒绝不会停止或修改它。",
                         primaryTitle: "确认在 App 中打开",
                         primaryAction: coordinator.acceptUnknownExistingService,
                         secondaryTitle: "不打开",
@@ -39,7 +39,7 @@ struct RootView: View {
 
                 case let .portAbnormal(reason):
                     statusView(
-                        title: "3080 端口的响应不能作为 DSH 页面加载",
+                        title: "\(LocalService.port) 端口的响应不能作为 DSH 页面加载",
                         detail: nonHTMLReasonText(reason),
                         primaryTitle: "重新检查",
                         primaryAction: coordinator.retry,
@@ -67,8 +67,16 @@ struct RootView: View {
                     )
                 case .portConflict:
                     statusView(
-                        title: "3080 已被其他服务占用",
-                        detail: "本次创建的 dsh 仍在受监督，但它没有监听 127.0.0.1:3080。为避免把其他服务误认为 owned，App 不会加载或停止该端口服务；可重新检查或查看本次内存日志。",
+                        title: "\(LocalService.port) 已被其他服务占用",
+                        detail: "本次创建的 dsh 仍在受监督，但它没有监听 \(LocalService.hostAndPort)。为避免把其他服务误认为 owned，App 不会加载或停止该端口服务；可重新检查或查看本次内存日志。",
+                        primaryTitle: "重新检查",
+                        primaryAction: { coordinator.continueWaitingForService() },
+                        retry: false
+                    )
+                case .listenerLost:
+                    statusView(
+                        title: "本次 DSH 已不再监听 \(LocalService.hostAndPort)",
+                        detail: "App 仍只监督自己创建的子进程，但已永久关闭本轮 native bridge（原生桥接）。可重新检查端口；若页面恢复，只会按重新验证后的归属加载。",
                         primaryTitle: "重新检查",
                         primaryAction: { coordinator.continueWaitingForService() },
                         retry: false
@@ -76,7 +84,7 @@ struct RootView: View {
                 case .ownershipLost:
                     statusView(
                         title: "已失去本次子进程的停止权",
-                        detail: "为避免误停其他服务，App 不会再对该 PID 发送信号。可以重新检查 127.0.0.1:3080；此操作只探测服务，不会创建或停止进程。",
+                        detail: "为避免误停其他服务，App 不会再对该 PID 发送信号。可以重新检查 \(LocalService.hostAndPort)；此操作只探测服务，不会创建或停止进程。",
                         primaryTitle: "重新检查",
                         primaryAction: coordinator.retry,
                         retry: false
@@ -84,7 +92,7 @@ struct RootView: View {
                 case .serviceStopped:
                     statusView(
                         title: "DSH 服务未运行",
-                        detail: "可以重新检查 127.0.0.1:3080，若端口空闲，App 才会启动本次受控 DSH。",
+                        detail: "可以重新检查 \(LocalService.hostAndPort)，若端口空闲，App 才会启动本次受控 DSH。",
                         primaryTitle: "重新检查",
                         primaryAction: coordinator.retry,
                         retry: false
@@ -92,7 +100,7 @@ struct RootView: View {
                 case .drainingCleanup:
                     statusView(
                         title: "正在排空本次进程遗留的日志",
-                        detail: "主进程已不再具有停止权。App 会继续读取 stdout/stderr，自然 EOF 前不会再次启动 DSH。可以重新检查 127.0.0.1:3080；此操作只探测服务，不会创建或停止进程。",
+                        detail: "主进程已不再具有停止权。App 会继续读取 stdout/stderr，自然 EOF 前不会再次启动 DSH。可以重新检查 \(LocalService.hostAndPort)；此操作只探测服务，不会创建或停止进程。",
                         primaryTitle: "重新检查",
                         primaryAction: coordinator.retry,
                         retry: false

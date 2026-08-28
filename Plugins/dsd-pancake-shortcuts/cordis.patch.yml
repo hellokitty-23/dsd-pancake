@@ -1,0 +1,5 @@
+# 此覆盖层只由 DSD Pancake 启动 DSH 时通过 `--patch` 提供。
+# 它不会写入用户 profile，也不会被普通 `dsh web` 自动加载。
+- insert:
+    - id: dsd-pancake-shortcuts
+      name: '@dsd-pancake/dsh-desktop-shortcuts'

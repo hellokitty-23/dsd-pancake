@@ -135,14 +135,3 @@ public enum DesktopTerminalBridgeResponse {
         ]
     }
 }
-
-/// 将“私有 patch 已准备”与“服务归属已验证”同时作为终端 capability 的前置条件。
-/// 任一条件缺失（特别是 external DSH）都必须保持 bridge 关闭。
-public enum DesktopTerminalBridgePolicy {
-    public static func mayEnable(
-        serviceOwnership: ServiceOwnership,
-        terminalPatchPrepared: Bool
-    ) -> Bool {
-        serviceOwnership == .owned && terminalPatchPrepared
-    }
-}

@@ -55,9 +55,16 @@ public enum AppPhase: Equatable, Sendable {
     case launchFailed(String)
     case serviceStopped
     case drainingProcessCleanup
-    case confirmingQuit
-    case stoppingOwnedService
-    case stopTimedOut
+}
+
+/// AppKit 退出事务与 DSH service lifecycle（服务生命周期）正交。退出确认不能覆盖
+/// `.spawning`、`.waitingReady` 或 ownership（归属）事实，否则异步 spawn/exit 回调会
+/// 因 phase 被临时 UI 状态替换而失效。
+public enum QuitLifecycleState: Equatable, Sendable {
+    case inactive
+    case confirming
+    case stopping
+    case timedOut
 }
 
 public struct CoordinatedState: Equatable, Sendable {
@@ -65,17 +72,20 @@ public struct CoordinatedState: Equatable, Sendable {
     public private(set) var generation: UInt64
     public private(set) var cleanup: ProcessCleanupState
     public private(set) var hasActiveHandle: Bool
+    public private(set) var quit: QuitLifecycleState
 
     public init(
         phase: AppPhase = .idle,
         generation: UInt64 = 0,
         cleanup: ProcessCleanupState = .clear,
-        hasActiveHandle: Bool = false
+        hasActiveHandle: Bool = false,
+        quit: QuitLifecycleState = .inactive
     ) {
         self.phase = phase
         self.generation = generation
         self.cleanup = cleanup
         self.hasActiveHandle = hasActiveHandle
+        self.quit = quit
     }
 
     public var mayStartNewProcess: Bool {
@@ -86,12 +96,14 @@ public struct CoordinatedState: Equatable, Sendable {
         phase: AppPhase? = nil,
         generation: UInt64? = nil,
         cleanup: ProcessCleanupState? = nil,
-        hasActiveHandle: Bool? = nil
+        hasActiveHandle: Bool? = nil,
+        quit: QuitLifecycleState? = nil
     ) {
         if let phase { self.phase = phase }
         if let generation { self.generation = generation }
         if let cleanup { self.cleanup = cleanup }
         if let hasActiveHandle { self.hasActiveHandle = hasActiveHandle }
+        if let quit { self.quit = quit }
     }
 }
 
@@ -104,14 +116,21 @@ public enum AppAction: Equatable, Sendable {
     case beginPreflight(generation: UInt64)
     case beginSpawn
     case spawned
+    case adoptedHandleForCleanup
+    case handleCleared(cleanup: ProcessCleanupState)
+    case cleanupChanged(ProcessCleanupState)
     case readinessTimedOut
     case serviceReady(ownership: ServiceOwnership)
+    case listenerLost
     case ownershipLost
     case processExited
     case pipesDrained
     case launchFailed(String)
     case beginQuit
+    case beginStoppingOwnedService
     case stopTimedOut
+    case serviceStopped
+    case terminalUnavailable
     case cancelQuit
 }
 
@@ -160,11 +179,26 @@ public enum StateReducer {
                 next.replace(phase: .waitingReady, hasActiveHandle: true)
             }
 
+        case .adoptedHandleForCleanup:
+            next.replace(cleanup: .supervisionOnly, hasActiveHandle: true)
+
+        case let .handleCleared(cleanup):
+            next.replace(cleanup: cleanup, hasActiveHandle: false)
+
+        case let .cleanupChanged(cleanup):
+            next.replace(cleanup: cleanup)
+
         case .readinessTimedOut where state.hasActiveHandle:
             next.replace(phase: .readinessTimedOut)
 
         case let .serviceReady(ownership) where state.hasActiveHandle || ownership == .external:
             next.replace(phase: .running(ownership))
+
+        case .listenerLost where state.hasActiveHandle:
+            // listener（端口监听者）归属与直接子进程停止权是两件事。这里不把
+            // cleanup 降级为 supervisionOnly，避免仅因端口暂时消失就丢失安全
+            // 停止自己子进程的能力。
+            next.replace(phase: .disconnectedOwned)
 
         case .ownershipLost where state.hasActiveHandle:
             next.replace(
@@ -189,19 +223,22 @@ public enum StateReducer {
             next.replace(phase: .launchFailed(message))
 
         case .beginQuit:
-            next.replace(phase: .confirmingQuit)
+            next.replace(quit: .confirming)
+
+        case .beginStoppingOwnedService:
+            next.replace(quit: .stopping)
 
         case .stopTimedOut:
-            next.replace(phase: .stopTimedOut)
+            next.replace(quit: .timedOut)
+
+        case .serviceStopped:
+            next.replace(phase: .serviceStopped, cleanup: .clear, hasActiveHandle: false)
+
+        case .terminalUnavailable:
+            next.replace(phase: .serviceStopped, cleanup: .terminalUnavailable, hasActiveHandle: false)
 
         case .cancelQuit:
-            if state.hasActiveHandle {
-                next.replace(phase: .running(.owned))
-            } else if state.cleanup.blocksNewSpawn {
-                next.replace(phase: .drainingProcessCleanup)
-            } else {
-                next.replace(phase: .idle)
-            }
+            next.replace(quit: .inactive)
 
         default:
             break

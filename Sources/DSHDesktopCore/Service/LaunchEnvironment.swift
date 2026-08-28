@@ -32,7 +32,28 @@ public enum LaunchEnvironment {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         notificationPatchURL: URL? = nil,
         terminalPatchURL: URL? = nil,
-        operationFoldingPatchURL: URL? = nil
+        operationFoldingPatchURL: URL? = nil,
+        shortcutPatchURL: URL? = nil
+    ) -> LaunchSpec {
+        var patches = PrivatePluginPatchSet()
+        patches[.notification] = notificationPatchURL
+        patches[.terminal] = terminalPatchURL
+        patches[.operationFolding] = operationFoldingPatchURL
+        patches[.shortcut] = shortcutPatchURL
+        return makeSpec(
+            executable: executable,
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory,
+            privatePluginPatches: patches
+        )
+    }
+
+    /// typed patch 集合避免调用方用四组平行 optional（可选值）表达同一概念。
+    public static func makeSpec(
+        executable: DSHExecutable,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        privatePluginPatches: PrivatePluginPatchSet
     ) -> LaunchSpec {
         var environment = baseEnvironment
         let executableDirectory = executable.url.deletingLastPathComponent().path
@@ -44,11 +65,7 @@ public enum LaunchEnvironment {
 
         return LaunchSpec(
             executable: executable.url,
-            arguments: launchArguments(
-                notificationPatchURL: notificationPatchURL,
-                terminalPatchURL: terminalPatchURL,
-                operationFoldingPatchURL: operationFoldingPatchURL
-            ),
+            arguments: launchArguments(privatePluginPatches: privatePluginPatches),
             workingDirectory: homeDirectory,
             environment: environment
         )
@@ -59,13 +76,31 @@ public enum LaunchEnvironment {
     public static func launchArguments(
         notificationPatchURL: URL? = nil,
         terminalPatchURL: URL? = nil,
-        operationFoldingPatchURL: URL? = nil
+        operationFoldingPatchURL: URL? = nil,
+        shortcutPatchURL: URL? = nil
     ) -> [String] {
-        let patches = [notificationPatchURL, terminalPatchURL, operationFoldingPatchURL].compactMap { $0 }
+        let patches = [
+            notificationPatchURL,
+            terminalPatchURL,
+            operationFoldingPatchURL,
+            shortcutPatchURL,
+        ].compactMap { $0 }
         guard !patches.isEmpty else { return requiredArguments }
 
         // `--patch` 属于 launcher 级选项，允许为同一次 App 私有启动附加多个独立
         // 覆盖层；它们都不写入用户的 Web profile。
+        return ["--profile", "web"]
+            + patches.flatMap { ["--patch", $0.path] }
+            + [
+                "--no-open",
+                "--host", LocalService.host,
+                "--port", "\(LocalService.port)",
+            ]
+    }
+
+    public static func launchArguments(privatePluginPatches: PrivatePluginPatchSet) -> [String] {
+        let patches = privatePluginPatches.orderedURLs
+        guard !patches.isEmpty else { return requiredArguments }
         return ["--profile", "web"]
             + patches.flatMap { ["--patch", $0.path] }
             + [

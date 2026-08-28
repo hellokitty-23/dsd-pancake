@@ -48,8 +48,14 @@ await import(`${clientURL.href}?verify=${Date.now()}`)
 if (definition === undefined) {
   throw new Error("提醒插件没有注册 DSH client module")
 }
+if (definition.id !== "@dsd-pancake/dsh-desktop-notifications") {
+  throw new Error("提醒插件注册了错误的 module id")
+}
 
 const plugin = definition.factory()
+if (JSON.stringify(plugin.inject) !== JSON.stringify(["sessions"])) {
+  throw new Error("提醒插件没有精确声明 sessions 注入")
+}
 let snapshot = {
   ids: ["reply", "goal", "subagent"],
   byId: {

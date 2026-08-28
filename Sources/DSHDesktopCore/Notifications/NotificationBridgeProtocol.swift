@@ -38,6 +38,28 @@ public enum DesktopNotificationBridge {
     }
 }
 
+/// WebKit handler 进入原生通知层前的协议级准入门。进程归属和 `SpawnHandle`
+/// 匹配由 `PrivatePluginBridgeAdmission` 决定；这里继续收紧 frame、origin 和 payload。
+public enum DesktopNotificationBridgeAdmission {
+    public static func decode(
+        _ body: Any,
+        bridgeEnabled: Bool,
+        isMainFrame: Bool,
+        originScheme: String,
+        originHost: String,
+        originPort: Int
+    ) -> DesktopNotificationBridgeAction? {
+        guard bridgeEnabled,
+              isMainFrame,
+              originScheme == LocalService.url.scheme,
+              originHost == LocalService.host,
+              originPort == LocalService.port else {
+            return nil
+        }
+        return DesktopNotificationBridge.decode(body)
+    }
+}
+
 public enum DesktopNotificationBridgeAction: Equatable, Sendable {
     case capabilities
     case requestAuthorization

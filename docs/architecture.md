@@ -10,7 +10,7 @@ Finder
   ▼
 DSD Pancake.app
   ├─ 探测 http://127.0.0.1:3080/
-  ├─ 必要时准备 App 私有提醒／操作折叠／终端插件的解析链接
+  ├─ 必要时准备 App 私有提醒／终端／操作折叠／双 Esc 快捷键插件的解析链接
   ├─ 必要时以独立的一次性 --patch 启动用户已有的 dsh
   ├─ 管理本次直接创建的子进程
   ├─ 管理每个 workspace 的原生 PTY 与底部 dock
@@ -23,7 +23,7 @@ DSD Pancake.app
           （仅 App 创建的进程加载私有插件）
 ```
 
-App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自动修改它们。DSD Pancake 自身每小时只读检查 GitHub 元数据，发现更新只在原生标题栏显示状态；用户打开原生 Popover 后，App 仅读取并验证固定 Release 的 SHA-256（安全散列算法）sidecar，只有验证成功才显示“下载更新”，并且绝不自动打开、安装、替换或重启 App。App 会在 DSH home 的保留命名空间维护三个只指向自身 bundle 的 resolver symlink（解析符号链接），但不改写用户 profile 的 package、bundle 或 patch 配置；唯一会修改 DSH 安装内容的路径，是用户看到版本差异、点击“更新 DSH”并在原生弹窗再次确认后，对来源已验证的全局 `@deepseek-ai/dsh` 执行固定 npm 更新。未知安装与 external（外部已有）服务一律不更新。它也不是通用浏览器、网页可调用终端、远程管理器或全局进程清理工具。App bundle 自带的提醒、操作折叠和终端插件都是壳的一部分。
+App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自动修改它们。DSD Pancake 自身每小时只读检查 GitHub 元数据，发现更新只在原生标题栏显示状态；用户打开壳内锚定更新浮层后，App 仅读取并验证固定 Release 的 SHA-256（安全散列算法）sidecar，只有验证成功才显示“下载更新”，并且绝不自动打开、安装、替换或重启 App。App 会在 DSH home 的保留命名空间维护四个只指向自身 bundle 的 resolver symlink（解析符号链接），但不改写用户 profile 的 package、bundle 或 patch 配置；唯一会修改 DSH 安装内容的路径，是用户看到版本差异、点击“更新 DSH”并在原生弹窗再次确认后，对来源已验证的全局 `@deepseek-ai/dsh` 执行固定 npm 更新。未知安装与 external（外部已有）服务一律不更新。它也不是通用浏览器、网页可调用终端、远程管理器或全局进程清理工具。App bundle 自带的提醒、终端、操作折叠和双 `Esc` 快捷键插件都是壳的一部分。
 
 ## 模块
 
@@ -32,22 +32,23 @@ App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自�
 | 应用壳层 | AppKit 生命周期、SwiftUI 状态页、窗口视觉、WebKit 容器和退出确认层。 |
 | 服务层 | 固定本机地址、DSH 可执行文件定位、启动环境与有界 HTTP 探测。 |
 | 更新服务 | SemVer（语义版本）比较、每小时独立调度、最小缓存恢复、固定 GitHub Release 只读检查、SHA-256 sidecar 校验下载、全局 npm 来源验证、DSH 固定参数更新与安装后复核。 |
-| 更新壳层 | 原生标题栏状态图标与 Popover；它不属于 DSH DOM（文档对象模型）或私有插件，只有用户点击才显示、下载或进入 DSH 写入确认。 |
+| 更新壳层 | `WindowChromeContainer` 内的原生标题栏状态图标与锚定浮层；两者按 sidebarWidth（侧栏宽度）和窗口尺寸布局，不属于 DSH DOM（文档对象模型）或私有插件。 |
 | 进程层 | 直接子进程创建、stdout/stderr 有界日志、PID/PGID/启动时间复核、监听 socket 复核与正常终止。 |
 | 状态层 | 串行状态归约、单实例锁和异步退出事务门控。 |
 | 网页层 | 同源页面与外部链接的导航策略。 |
 | 私有提醒插件 | 只在本 App 创建的 DSH 进程内，观察公开会话摘要并生成最小完成事件。 |
-| 私有操作折叠插件 | 使用 DSH 正式 view／header／keyed slot（视图／标题栏／键控插槽）在消息行创建前按助手轮次收纳非交互工具卡，会话内就地展开／折叠，不写会话数据。 |
+| 私有操作折叠插件 | 使用 DSH 正式 view／header／keyed slot（视图／标题栏／键控插槽）在消息行创建前按助手轮次收纳非交互工具卡，并把每个助手轮次的多条 `Think` 投影为一条最新摘要；两者独立就地展开，不写会话数据。 |
 | 原生通知桥 | 仅接受本机同源顶层页面的严格固定协议，负责 macOS 授权、前台抑制、内存去重和通知点击恢复窗口。 |
 | 私有终端插件 | 在 native bridge 已确认可用时订阅正式 `sessions.list` 的 current（当前会话），仅读取其 `cwd` 无界面同步工作区；没有 WebKit bridge 时完全 no-op（无操作）。 |
 | 原生终端层 | AppKit 标题栏按钮、一个持久 `WKWebView` 与一个右侧原生底部 dock；SwiftTerm PTY、工作区隔离、面板状态和 process group（进程组）清理。 |
+| 私有快捷键插件 | 在当前 session 正在运行时，以 2 秒双 `Esc` 确认调用正式 `session.cancel()`；不经过原生 bridge，不控制其它 session 或进程。 |
 | 受控验证器 | 不依赖真实 DSH 的受控验证器。 |
 
 应用层通过 `AppCoordinator` 编排，Core 不直接依赖 SwiftUI 或窗口对象。
 
 ## 启动与服务归属
 
-启动时先取得单实例锁，然后探测固定地址 `127.0.0.1:3080`：
+正式 App 启动时先取得单实例锁，然后探测固定地址 `127.0.0.1:3080`；隔离 Test App 使用其 bundle 内声明的独立端口，但遵循相同流程：
 
 1. 已有可识别 DSH 时，直接在 WebView 中显示，标记为 `external`（外部已有）。
 2. 已有可访问但无法确认的服务时，要求用户确认是否显示；无论是否显示都不接管它。
@@ -60,19 +61,29 @@ App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自�
      -> DSD Pancake.app/Contents/Resources/DSHTerminal
    $DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-operation-folding
      -> DSD Pancake.app/Contents/Resources/DSHOperationFolding
+   $DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-shortcuts
+     -> DSD Pancake.app/Contents/Resources/DSHShortcuts
    ```
 
    接着用 DSH launcher（启动器）参数数组启动：
 
    ```text
-   dsh --profile web --patch <提醒 patch> --patch <终端 patch> --patch <操作折叠 patch> --no-open --host 127.0.0.1 --port 3080
+   dsh --profile web --patch <提醒 patch> --patch <终端 patch> --patch <操作折叠 patch> --patch <双 Esc 快捷键 patch> --no-open --host 127.0.0.1 --port 3080
    ```
 
-   `--patch` 是该进程参数，不会改写默认 profile；因此普通 `dsh web` 和浏览器直接访问的既有 DSH 都不会加载插件。若普通浏览器访问的是 App 已启动的同一 patched service（已挂载覆盖层的服务），DSH 仍会传送三个客户端模块：提醒和终端因没有 WebKit 原生桥而不订阅会话、不申请权限、不发送通知或同步工作区；操作折叠不依赖原生桥，因此仍会改变该共享服务中的工具卡呈现。保留命名空间中的失效链接会修复到当前 bundle，任何仍指向可访问目录的链接绝不覆盖。若某一插件资源缺失，或对应 resolver（解析路径）被用户文件、符号链接或特殊节点占用，App 只省略这一项 `--patch`，其余准备成功的 patch 仍正常加载；这类准备失败不会触发整套无插件重试。只有已经实际带至少一个 `--patch` 启动的 DSH 进程在网页就绪前退出时，App 才一次性改用不带任何 App 私有 patch 的标准 `dsh web` 重试，且不循环重试。
+   `--patch` 是该进程参数，不会改写默认 profile；因此普通 `dsh web` 和浏览器直接访问的既有 DSH 都不会加载插件。若普通浏览器访问的是 App 已启动的同一 patched service（已挂载覆盖层的服务），DSH 仍会传送四个客户端模块：提醒和终端因没有 WebKit 原生桥而不订阅会话、不申请权限、不发送通知或同步工作区；操作折叠和双 `Esc` 快捷键不依赖原生桥，因此仍会改变该共享服务中的操作呈现或响应当前页面的停止手势。保留命名空间中的失效链接会修复到当前 bundle，任何仍指向可访问目录的链接绝不覆盖。若某一插件资源缺失，或对应 resolver（解析路径）被用户文件、符号链接或特殊节点占用，App 只省略这一项 `--patch`，其余准备成功的 patch 仍正常加载；这类准备失败不会触发整套无插件重试。只有已经实际带至少一个 `--patch` 启动的 DSH 进程在网页就绪前退出时，App 才一次性改用不带任何 App 私有 patch 的标准 `dsh web` 重试，且不循环重试。
 
-4. 服务就绪后，只有满足“本 App 直接创建 + 进程身份仍匹配 + 该进程自身监听固定回环端口”的进程才标记为 `owned`（本应用拥有）。原生提醒和终端 bridge 也只在各自 patch 已准备的这个 `owned` 进程有效；已有或后继的 external（外部已有）服务始终没有 bridge 能力。只要 ownership 丢失，终端面板立即收起且所有 App 创建的 PTY 都被清理。
+   双 `Esc` 插件只监听当前 DSH 页面，并在 capture phase（DOM 事件捕获阶段）先于 composer（输入区）的 React 冒泡处理记录按键和可见弹层状态，再等本次传播结束后判断 `defaultPrevented`。因此 DSH commands、model picker、dialog 等弹层用于关闭自己的 `Esc` 不会计入双击；中文输入法的 composing（组字）状态和 WebKit `keyCode=229` 兼容事件也会被忽略并打断已有布防。第一次未被 DSH 消费的有效 `Esc` 只显示两秒提示，不阻断 DSH 原有行为；同一运行会话在闭区间两秒内收到第二次未消费的有效 `Esc` 时，才调用 DSH 公开的 `session.cancel()`。会话切换、其它按键、指针操作、窗口失焦或生成结束都会清除布防状态。
+
+4. resolver prepare（解析器准备）只记录本轮候选 patch，不授予 native bridge（原生通信桥）。`ProcessSupervisor.spawn` 成功后，候选集合才绑定到返回的精确 `SpawnHandle`（进程句柄）；服务就绪后，还必须同时满足“本 App 直接创建 + 句柄仍匹配 + 进程身份仍匹配 + 该进程自身监听固定回环端口”，进程才标记为 `owned`（本应用拥有），提醒和终端 bridge 才分别按本句柄实际加载的 patch 开启。监视器在整个会话期间持续复核进程身份与该 listener（监听者）；listener 消失、被其它进程替换或进程 ownership（归属）丢失时，本轮 bridge 能力会立即且永久撤销，终端面板收起并清理 App 创建的 PTY。只要原进程身份仍可验证，App 仍保留对该直接子进程的安全监督与一次性停止权，但不会把同端口后来出现的网页重新认作 owned。旧 generation（进程代次）、准备成功但尚未完成监听归属复核、已有或后继的 external（外部已有）服务始终没有 bridge 能力。
 
 端口、PID 或命令文本都不足以证明归属。App 不使用 `pkill`，不扫描其他 PID，也不会把已存在的服务变成可停止对象。
+
+### 隔离 Test App 运行时
+
+正式 bundle 始终使用 `io.github.hellokitty-23.dsd-pancake`、端口 `3080`、默认 DSH home 与 persistent WebKit data store（持久网页数据存储）。普通环境变量不能把它切换成测试模式。只有打包时 `Info.plist` 同时写入 `DSDPancakeTestMode=true`，且 bundle ID 与正式身份不同，`AppRuntimeConfiguration` 才接受隔离端口和 `DSH_HOME`；损坏或误用 3080 的 Test 端口配置也会回退到非正式端口 `13080`，不会落到 3080。
+
+`scripts/local-release/build-test-app.zsh` 生成 `DSD Pancake Test.app`，并在构建前拒绝被占用或不安全的端口。Test build（测试构建）默认使用独立 bundle ID、13080、输出目录内的 `test-dsh-home` 与 `test-downloads`、non-persistent WebKit data store（非持久网页数据存储）和关闭遥测的 DSH 子进程环境；不同 bundle ID 同时隔离 Preferences（偏好）与 single-instance lock（单实例锁）。Test root（测试根目录）及其子目录经过标准化和符号链接解析，不能落在正式 `~/.dsh`、`~/Downloads` 或正式 App Support 内；运行时遇到损坏路径会回退到 Test bundle 自己的 App Support 命名空间。四个 resolver symlink 只写入 Test DSH home 并指向 Test bundle。可选的 `DSHD_TEST_APP_VERSION` 只覆盖复制出的 Test bundle 版本，用于验收真实更新入口，正式构建会拒绝该变量。脚本只生成和校验显式输出目录中的 `.app`，不生成正式 DMG、不写 `/Applications`，也不停止、替换或读取当前正式 App、正式下载目录与 3080 listener（监听器）。
 
 ## 可选更新边界
 
@@ -80,9 +91,13 @@ App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自�
 
 缓存仅包含 App 的最新稳定版本，以及 DSH 的可执行文件绝对路径、当前版本和最新版本。App 恢复缓存时重新从固定常量推导 GitHub Release／资产地址，不持久化重定向 URL、签名参数或响应正文；DSH 恢复缓存时必须再次读取当前选择的可执行文件版本，路径或版本变化立即丢弃缓存。任一检查失败不会伪造“已是最新”，也不会抹掉已验证的另一项提示。
 
-App 自身的检查从 bundle 读取当前版本，只对固定公开仓库的 `/releases/latest` 页面发出 `HEAD`（仅响应头）请求，并解析 GitHub 最终重定向的稳定 SemVer 标签；它使用无 Cookie、无凭据缓存的临时会话，不使用需要未登录速率额度的 GitHub REST API。发布页必须是固定项目的精确 tag 路径，DMG 与 checksum（校验文件）地址再由已验证标签和固定 arm64 命名生成。壳层标题栏左侧的原生状态图标仅在发现可选更新时显示；手动检查的汇总结果通过当次原生确认弹窗呈现，确认没有更新时图标保持隐藏。它不注入 DSH 页面、header 或插件，也不持久化手动检查报告。
+App 自身的检查从 bundle 读取当前版本，只对固定公开仓库的 `/releases/latest` 页面发出 `HEAD`（仅响应头）请求，并解析 GitHub 最终重定向的稳定 SemVer 标签；它使用无 Cookie、无凭据缓存的临时会话，不使用需要未登录速率额度的 GitHub REST API。发布页必须是固定项目的精确 tag 路径，DMG 与 checksum（校验文件）地址再由已验证标签和固定 arm64 命名生成。壳层标题栏的原生状态图标仅在发现可选更新时显示；手动检查的汇总结果通过当次原生确认弹窗呈现，确认没有更新时图标保持隐藏。它不注入 DSH 页面、header 或插件，也不持久化手动检查报告。
 
-用户打开 Popover 时，下载器先读取精确同名 `.sha256` sidecar，严格要求单行 `<64 位 hash><空白><精确 DMG 文件名>`；缺失／错误时界面只提供发布页。只有 sidecar 已验证、用户再点击“下载更新”时，才会继续 DMG 传输。它只允许从固定 GitHub 初始 URL 跳转到明确列出的 GitHub Release 资产主机；DMG 写入 Downloads 同目录的 App 自己创建的 `.part` 文件，流式算出 SHA-256 后再和 sidecar 比较。只有匹配时才通过不覆盖的 `moveItem` 移动到最终文件名；既有文件使用递增后缀。失败或取消只删除本次精确临时文件，且不会打开、挂载、安装、替换或重启 App。“关于”窗口复用同一个固定仓库常量显示项目地址。
+更新图标与更新面板都由 `WindowChromeContainer` 持有。`UpdateOverlayLayout` 以当前 `ChromeSurfaceStyle.sidebarWidth` 计算 mainLeading（主内容区起点）：图标位于该起点右侧的安全间距，面板从主内容区起点后留白处展开；正常窗口中箭头准确指向图标，极窄窗口则优先保证内容不越过右边界并允许箭头进入钳制后的降级位置。sidebarWidth 或窗口宽度变化都会触发重新布局。面板是主窗口内容中的原生 SwiftUI surface（表面），不是 `NSPopover`、独立 window（窗口）或 DSH 页面节点，因此和当前 App 保持同一视觉与焦点层级。没有下载任务时，按 `Esc`、点击面板外、窗口 resign key（失去键盘焦点）或进入全屏会关闭面板并恢复先前焦点；下载进行中浮层不会被这些瞬时事件打断，`Esc` 仍由原生壳层消费而不泄漏给网页双 `Esc` 逻辑，用户需通过“取消下载”结束任务。面板内按钮保持可点击。
+
+用户打开更新浮层时，下载器先读取精确同名 `.sha256` sidecar，严格要求单行 `<64 位 hash><空白><精确 DMG 文件名>`；缺失／错误时界面只提供发布页。只有 sidecar 已验证、用户再点击“下载更新”时，才会继续 DMG 传输。它只允许从固定 GitHub 初始 URL 跳转到明确列出的 GitHub Release 资产主机；DMG 写入 Downloads 同目录的 App 自己创建的 `.part` 文件，流式算出 SHA-256 后再和 sidecar 比较。只有匹配时才通过不覆盖的 `moveItem` 移动到最终文件名；既有文件使用递增后缀。失败或取消只删除本次精确临时文件，且不会打开、挂载、安装、替换或重启 App。
+
+下载完成状态不把文件路径当作永久事实。每次重新打开浮层时，`AppReleaseDownloadService` 只做同步的轻量节点检查：确认路径仍存在、不是目录、是普通文件且不是符号链接；不会因为展示浮层而重复读取整份 DMG。用户执行“在 Finder 中显示”或“打开 DMG”前，下载器才异步重新计算完整 SHA-256，并与已验证 sidecar 比较。若文件已被用户删除、移走、替换成不安全节点，浮层重开时就会清除失效结果；若节点仍是普通文件但同路径内容已变化，则在 Finder／打开动作的完整校验阶段清除失效结果。已验证的 sidecar 仍适用于当前版本时回到 ready-to-download（可下载）状态，否则回到 idle（空闲）并重新验证，绝不尝试打开旧路径。“关于”窗口复用同一个固定仓库常量显示项目地址。
 
 DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥有）进程”的所有权规则：
 
@@ -108,9 +123,9 @@ DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥�
 
 ## 网页边界
 
-`WebContainer` 在整个会话中只创建一个持久 `WKWebView`，保留 DSH 的 WebKit 登录状态与页面状态。
+`WebContainer` 在整个 App 生命周期中只创建一个 `WKWebView`。正式 App 使用默认 persistent data store（持久网页数据存储）来保留 DSH 的 WebKit 登录状态与页面状态；隔离 Test App 使用 non-persistent data store，窗口内状态仍连续，但退出后不复用测试网页数据。
 
-- `127.0.0.1:3080` 同源顶层导航留在 App 内；
+- 正式 App 的 `127.0.0.1:3080`、或 Test bundle 声明的独立回环端口，同源顶层导航留在 App 内；
 - 用户点击的外部 HTTP/HTTPS 链接交给默认浏览器；
 - 非用户触发的跨源跳转、无地址跳转和不支持的 scheme（协议）会被阻止并给出说明；
 - `target=_blank` 不创建第二个窗口；
@@ -123,7 +138,7 @@ DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥�
 - 普通对话从 `running` 变为不运行；
 - goal（目标）进入 `complete`（完成）或 `blocked`（受阻）这一不同的终态；例如先受阻、后完成会分别提醒一次。
 
-有 goal 的会话只发终态通知，避免“普通回复”和“任务完成”重复。插件把不含自由文本的 event ID（事件标识）与固定 kind（类型）经 WebKit reply bridge（可回复桥）发送给原生 App；桥只接受 `http://127.0.0.1:3080` 的顶层页面、协议版本 `1` 和精确字段集。原生层固定显示“对话已有回复”“任务已完成”或“任务需要你处理”，并且：
+有 goal 的会话只发终态通知，避免“普通回复”和“任务完成”重复。插件把不含自由文本的 event ID（事件标识）与固定 kind（类型）经 WebKit reply bridge（可回复桥）发送给原生 App；桥只接受当前 runtime（运行时）配置的本机回环端口顶层页面、协议版本 `1` 和精确字段集，正式 App 对应 `http://127.0.0.1:3080`。原生层固定显示“对话已有回复”“任务已完成”或“任务需要你处理”，并且：
 
 - 完成提醒投递模式分为“永不”“仅在未聚焦时”（默认）和“一律”；默认模式仅在 App 非前台、窗口隐藏或最小化时投递，“一律”也允许前台横幅；
 - 首次打开 App 时由 macOS 询问通知权限；拒绝后插件静默降级；
@@ -133,7 +148,7 @@ DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥�
 
 ## 执行操作折叠
 
-私有操作折叠插件以同一事务覆盖 DSH 正式 `conversation.view` 中 `id: "chat"` 的 list cell（列表单元）与 `conversation.session.header`。Chat view wrapper（对话视图包装组件）仍以 React JSX 委托上游原组件，只把传入的 `useSession` 包装成只读投影：折叠时在上游 `order.map` 创建消息行之前，从 `snapshot.chat.order` 移除每轮摘要 anchor（锚点）以外的可折叠工具 key；`nodes`、`locations`、timeline（时间线）及其他会话字段保持原引用，展开或没有可折叠项时直接返回原始 snapshot（快照）和顺序。这样被收纳的工具不会产生仍占 `gap`（布局间距）的空 `flowItem`（消息流行），用户消息、助手正文、最终回复、系统警告、交互式与未知工具仍由 DSH 原生顺序渲染。
+私有操作折叠插件以同一事务覆盖 DSH 正式 `conversation.view` 中 `id: "chat"` 的 list cell（列表单元）与 `conversation.session.header`。Chat view wrapper（对话视图包装组件）仍以 React JSX 委托上游原组件，只把传入的 `useSession` 包装成只读投影：工具折叠时在上游 `order.map` 创建消息行之前，从 `snapshot.chat.order` 移除每轮摘要 anchor（锚点）以外的可折叠工具 key；`Think` 归并只对当前投影浅拷贝相关 assistant-step（助手步骤）节点、移除其 reasoning（推理内容）block（内容块）并在锚点附加私有展示数据，原 snapshot、locations、timeline（时间线）和 DSH 会话数据都不改变。这样被收纳的工具和纯 reasoning 行不会产生仍占 `gap`（布局间距）的空 `flowItem`（消息流行），用户消息、助手正文、最终回复、系统警告、交互式与未知工具仍由 DSH 原生顺序渲染。
 
 同 `id: "chat"` 的 shadow（影子注册）会同时出现在上游原始 view ledger（视图清单）中，因此标题栏 wrapper 只对注入的 `views.list()` 按 `id` 去重，再委托原生标题栏；其订阅、版本与其他 view 保持不变。Chat view 与标题栏去重必须作为同一代 generation（注册代）一起成功，否则全部回滚，避免出现重复“对话”标签或半接管状态。它不替换 conversation（会话）、session body（会话主体）、turn（轮次）、composer（输入区）或 root（根界面）。
 
@@ -141,9 +156,17 @@ DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥�
 
 插件订阅所有实际经过的上游 source slot（来源插槽）。来源变化时先按逆序释放旧 view／header shadow 与整棵别名树，再同步建立新一代注册，避免同一 cell 出现相同身份与优先级的双注册；任何一步失败都会让上游获胜项立即恢复。注册前还会验证父、子 slot 规格及原始注入协议，并通过 `onEntryError` 监听所有私有注册项的渲染异常：首次异常即在本次 App 运行中熔断、撤销全部接管且不自动重试，避免 dead cell（已让位但仍占位的空白单元）、重复标签或崩溃循环。
 
-每个会话只在模块内存中保存一个展开布尔值；新会话与 App 重启后都默认折叠。渲染时从 `node.location.turn` 和 `snapshot.chat.locations.getTurn` 取得当前助手轮次的有序工具节点，递归收集明确列入白名单的非交互工具，再用稳定 `callId` 去重。该轮第一个可折叠节点作为 anchor（锚点）：折叠时它渲染实时当前操作与统计按钮，其余同类 key 在 Chat view 顺序投影中被省略；展开时返回原始顺序，每个节点复用原生 atomic tool card（原子工具卡）。未知工具、交互工具、缺少 turn 位置或解析失败的节点不隐藏。
+工具卡按 session 在模块内存中保存展开布尔值；新会话与 App 重启后都默认折叠。渲染时从 `node.location.turn` 和 `snapshot.chat.locations.getTurn` 取得当前助手轮次的有序工具节点，递归收集明确列入白名单的非交互工具，再用稳定 `callId` 去重。该轮第一个可折叠节点作为 anchor（锚点）：折叠时它渲染实时当前操作与统计按钮，其余同类 key 在 Chat view 顺序投影中被省略；展开时返回原始顺序，每个节点复用原生 atomic tool card（原子工具卡）。未知工具、交互工具、缺少 turn 位置或解析失败的节点不隐藏。
 
-汇总按钮是控制器也是状态显示，支持鼠标、Enter 和 Space（空格），并提供 `aria-expanded` 与可读标签。失败数始终展示，大于零时使用克制的错误色；展开后失败详情仍在原生卡中可查。插件不使用 DOM selector（DOM 选择器）、`MutationObserver`、网络、持久化存储或 native bridge。
+每个 assistant turn（助手轮次）的所有 visible（可见）assistant-step reasoning 会再形成一个独立 Think group（思考组）。插件沿原生顺序寻找最后一个非空 reasoning，取其最后一行非空文本作为单行 `Think · <摘要>`，并保存该条完整文本用于就地展开；之后到达的空流式片段不会覆盖有效摘要，也不显示累计条数。只有纯 reasoning 的其它步骤会从投影顺序中移除；含正文、interrupted（被中断）状态、警告或其它独立 block 的步骤仍通过上游原组件渲染这些内容。Think 展开状态按 session + turn 保存在模块内存中，与工具卡的 session 展开状态互不影响，App 或插件重载后都恢复默认收起。
+
+工具汇总行与 Think 摘要行都是原位控制器，使用原生 button（按钮）语义，支持鼠标、Enter 和 Space（空格），并提供 `aria-expanded` 与可读标签。失败数始终展示，大于零时使用克制的错误色；展开后工具失败详情仍在原生卡中可查。插件不使用 DOM selector（DOM 选择器）、`MutationObserver`、网络、持久化存储或 native bridge；任何规格或渲染接管失败都完整撤销本次投影，保留 DSH 上游界面。
+
+## 双 `Esc` 停止生成
+
+私有快捷键插件只依赖 DSH 正式 `sessions.list` 与 `sessions.binding(sessionID).session.cancel()`。每次按键都重新确认 current（当前）session 存在、摘要仍为 `running`，且 binding 提供可调用的 `cancel()`；否则清空状态且不消费按键。第一个有效 `Esc` 只记录当前 session ID 和 monotonic time（单调时钟时间），并在不可交互的 `shell.overlay` 状态提示中显示“再按一次 Esc 停止生成”。同一 session 的第二个有效 `Esc` 只有落在第一次按键后的闭区间 `[0, 2000ms]` 才会发出一次取消请求；边界 `2000ms` 仍有效，超时则把本次按键视为新的一次待确认。两次按键都继续交给 DSH 原有事件链处理。
+
+快捷键过滤所有带 Option／Control／Command／Shift 修饰键的事件、`repeat`、IME `isComposing`、已经 `defaultPrevented` 的事件，以及可见 `dialog`／`menu`／`listbox` 等 DSH 弹层或独立输入控件用于关闭自身的事件。这些无效 `Esc`、任何其它键、pointer down（鼠标或触控点击）、窗口 `blur`（失焦）、current session 变化、session 不再运行或插件 dispose（卸载）都会重置待确认与提示；同一 session 的取消请求进行中也不会重复提交。取消返回失败或抛错只显示短暂、不可点击的“停止失败，请重试”，不自动重试。插件不停止 DSH 进程、其它 session 或终端 PTY，也不向原生 App 发送 bridge 消息；因此普通浏览器访问同一个 App patched service 时同样生效，而手动启动、未加载 patch 的 DSH 完全不受影响。
 
 ## 底部终端
 
@@ -154,7 +177,7 @@ DSH sessions.list current session
   └─ 私有终端 client plugin
       ├─ 仅读取 current session.cwd（包括新会话的空白 session）
       └─ 只发送 capabilities / syncWorkspace / clearWorkspace
-                  │  主 frame + 127.0.0.1:3080 + 精确字段集
+                  │  主 frame + 当前 runtime 回环端口 + 精确字段集
                   ▼
           WebContainer terminal bridge
                   │  workspace 必须是存在的目录
@@ -180,11 +203,11 @@ DSH sessions.list current session
 
 子进程 stdout/stderr 只保留在内存中的有界环形日志中。常见 token、Authorization、Cookie 等敏感键值会被遮盖，日志默认不落盘。
 
-网页数据由 WebKit 按 App bundle ID 保存；用户偏好保存上次手动选择的 `dsh` 路径、提醒偏好，以及最后检查时间与最小更新缓存。它不保存 GitHub／npm 响应正文、下载重定向 URL、DMG 内容、网页数据或遥测。删除 App 不会删除 DSH 的数据。fork（派生）后如需和原 App 并存，应先改掉 `CFBundleIdentifier`，以获得独立的单实例锁与 WebKit 数据命名空间。
+正式 App 的网页数据由 WebKit 按 bundle ID 保存；用户偏好保存上次手动选择的 `dsh` 路径、提醒偏好，以及最后检查时间与最小更新缓存。它不保存 GitHub／npm 响应正文、下载重定向 URL、DMG 内容、网页数据或遥测。隔离 Test App 使用 non-persistent WebKit data store，且以不同 bundle ID 隔离偏好和单实例锁。删除 App 不会删除 DSH 的数据。fork（派生）后如需和原 App 并存，不能只改 `Info.plist`：还必须同步 `AppRuntimeConfiguration.productionBundleIdentifier`、打包／校验脚本中的正式与 Test 身份；若 fork 使用自己的 Release，再同步 `AppUpdateService` 的固定 repository 与受信任 tag／download 路径及其验证夹具。完整清单以 [build-and-run.md](./build-and-run.md) 的 fork 说明为准。
 
 ## 本地打包
 
-项目使用 Swift Package Manager，并固定 SwiftTerm `1.20.0`（MIT License；见 `THIRD_PARTY_NOTICES.md`）。`scripts/local-release/build-app.zsh` 将 Release 可执行文件、`Info.plist`、两套图标、三个已构建的 App 私有插件各四个文件，以及 SwiftTerm 唯一必要的 `Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal` 放入 `.app` 后，使用 `codesign --sign -` 完成无身份的本机 ad-hoc 签名。SwiftTerm 当前 Metal renderer 会从标准的 `Bundle.main.resourceURL` 查找这个 bundle；将资源放在 `.app` 根目录会破坏 macOS bundle 的 sealed resources（签名封装资源）规则，因此 `verify-app.zsh` 对标准资源位置使用精确白名单。`PancakeAppIcon` 是由 `Resources/AppIcon.png` 生成的 Finder／原生通知 bundle 身份图标，`DockIcon` 只在运行时显示于 Dock，二者可独立调整留白与构图；白名单拒绝 DSH、Node.js、`node_modules`、第三方插件、网页资源、测试夹具、额外可执行文件和符号链接。`build-dmg.zsh` 只把已通过检查的 App 与指向 `/Applications` 的快捷入口封装为只读压缩 DMG，并强制输出 `DSD-Pancake-v<version>-arm64.dmg` 与精确同名 `.sha256` sidecar；`verify-dmg.zsh` 在挂载前精确比对 sidecar，再真实挂载映像并再次验证其中的 App 与版本化文件名；`build-release.zsh` 是串联整套流程的单一入口。
+项目使用 Swift Package Manager，并固定 SwiftTerm `1.20.0`（MIT License；见 `THIRD_PARTY_NOTICES.md`）。`scripts/local-release/build-app.zsh` 将 Release 可执行文件、`Info.plist`、两套图标、四个已构建的 App 私有插件各四个文件，以及 SwiftTerm 唯一必要的 `Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal` 放入 `.app` 后，使用 `codesign --sign -` 完成无身份的本机 ad-hoc 签名。SwiftTerm 当前 Metal renderer 会从标准的 `Bundle.main.resourceURL` 查找这个 bundle；将资源放在 `.app` 根目录会破坏 macOS bundle 的 sealed resources（签名封装资源）规则，因此 `verify-app.zsh` 对标准资源位置使用精确白名单。`PancakeAppIcon` 是由 `Resources/AppIcon.png` 生成的 Finder／原生通知 bundle 身份图标，`DockIcon` 只在运行时显示于 Dock，二者可独立调整留白与构图；白名单拒绝 DSH、Node.js、`node_modules`、第三方插件、网页资源、测试夹具、额外可执行文件和符号链接。`build-dmg.zsh` 只把已通过检查的正式 App 与指向 `/Applications` 的快捷入口封装为只读压缩 DMG，并强制输出 `DSD-Pancake-v<version>-arm64.dmg` 与精确同名 `.sha256` sidecar；`verify-dmg.zsh` 在挂载前精确比对 sidecar，再真实挂载映像并再次验证其中的 App 与版本化文件名；`build-release.zsh` 是串联正式流程的单一入口。`build-test-app.zsh` 复用 App 构建器但写入隔离身份、端口与 DSH home，随后以 Test 专用规则校验，既不调用 DMG 构建器，也不产生可发布产物。
 
 这保证“App 是壳”是可检查的包结构，而不只是文档承诺。
 
@@ -194,4 +217,4 @@ DSH sessions.list current session
 zsh scripts/verify.zsh
 ```
 
-验证器覆盖状态机、单实例、日志脱敏、导航、WebKit 持久化配置、私有插件解析链接、提醒与终端 bridge 协议、操作折叠的会话状态、`callId` 去重、失败统计与 slot 降级、通知前台策略与去重、终端 workspace 隔离、dock 的 50% 高度上限、右侧内容区域和对话预留高度规则、SemVer（语义版本）、GitHub Release 来源与 npm 路径边界、每小时时间表、缓存失效、标题栏更新标签、固定 Release 资产跳转、严格 SHA-256 sidecar、sidecar 缺失、哈希不匹配、下载中取消、无覆盖目标名和受控 URLProtocol 的实际落盘哈希计算、受控单次命令、受控 HTTP 探测、进程创建／回收／归属和退出门控。客户端插件验证额外证明提醒与终端在普通浏览器中 no-op、正式 tool-call keyed cell 内的默认折叠与就地展开、公开 composer footer slot 的不可交互布局预留、无界面工作区同步与最小 bridge 负载。文档中的脚本固定跳过当前 3080，以免读取用户正在使用的服务。
+验证器覆盖状态机、单实例、日志脱敏、导航、正式／Test WebKit data store 选择、隔离 Test 身份与非 3080 端口、受保护正式目录拒绝与安全回退、四个私有插件解析链接、提醒与终端 bridge 协议、操作折叠的会话状态、`callId` 去重、失败统计与 slot 降级、每轮最新 Think 的只读投影与独立展开、双 `Esc` 的 2 秒闭区间／事件过滤／状态重置／单次取消、通知前台策略与去重、终端 workspace 隔离、dock 的 50% 高度上限、右侧内容区域和对话预留高度规则、SemVer（语义版本）、GitHub Release 来源与 npm 路径边界、每小时时间表、缓存失效、标题栏更新标签、更新浮层的 sidebarWidth 动态锚定与窄窗边界、固定 Release 资产跳转、严格 SHA-256 sidecar、sidecar 缺失、哈希不匹配、下载中取消、下载后文件被删除或同路径内容被替换的失效恢复、无覆盖目标名和受控 URLProtocol 的实际落盘哈希计算、受控单次命令、受控 HTTP 探测、进程创建／回收／归属和退出门控。客户端插件验证额外证明提醒与终端在普通浏览器中 no-op、正式 tool-call keyed cell 内的默认折叠与就地展开、Think 空流式片段不覆盖有效摘要、双 `Esc` 只取消当前 running session、公开 composer footer slot 的不可交互布局预留、无界面工作区同步与最小 bridge 负载。文档中的正式脚本固定跳过当前 3080，以免读取用户正在使用的服务；Test App 只使用单独的未占用端口与 DSH home。

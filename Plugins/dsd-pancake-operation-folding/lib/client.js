@@ -42,9 +42,39 @@ window.__ModuleLoader__.load({
     const emptyKeys = []
     const expandedSessions = new Set()
     const expansionListeners = new Set()
+    const expandedThinkTurns = new Map()
+    const thinkExpansionListeners = new Set()
+    const thinkProjection = Symbol("dsd-pancake.operation.think-projection")
     let renderFailureDisabled = false
 
     const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value)
+    const nodeFromStore = (nodeStore, key) => (
+      typeof nodeStore?.get === "function" ? nodeStore.get(key) : nodeStore?.[key]
+    )
+    const nodeValuesFromStore = (nodeStore) => (
+      typeof nodeStore?.values === "function"
+        ? Array.from(nodeStore.values())
+        : isRecord(nodeStore) ? Object.values(nodeStore) : []
+    )
+    const projectedNodeStore = (nodeStore, replacements) => {
+      const replacementsByNode = new Map()
+      for (const [key, replacement] of replacements) {
+        const source = nodeFromStore(nodeStore, key)
+        if (source !== undefined) replacementsByNode.set(source, replacement)
+      }
+      const values = nodeValuesFromStore(nodeStore).map((node) => {
+        const identityReplacement = replacementsByNode.get(node)
+        if (identityReplacement !== undefined) return identityReplacement
+        const key = isRecord(node) ? node.key : undefined
+        return replacements.has(key) ? replacements.get(key) : node
+      })
+      return Object.freeze({
+        get: (key) => replacements.has(key)
+          ? replacements.get(key)
+          : nodeFromStore(nodeStore, key),
+        values: () => values,
+      })
+    }
     const callName = (block) => {
       if (!isRecord(block)) return ""
       if (block.kind === "tool-result") {
@@ -75,6 +105,75 @@ window.__ModuleLoader__.load({
     const toolRoot = (node) => {
       if (!isRecord(node) || node.kind !== "tool-call" || !isRecord(node.data)) return undefined
       return isRecord(node.data.root) ? node.data.root : undefined
+    }
+
+    const assistantBlocks = (node) => (
+      isRecord(node)
+      && node.kind === "assistant-step"
+      && isRecord(node.data)
+      && Array.isArray(node.data.blocks)
+        ? node.data.blocks
+        : undefined
+    )
+
+    const lastNonEmptyLine = (text) => {
+      if (typeof text !== "string") return ""
+      const lines = text.split(/\r?\n/)
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = lines[index].replace(/\s+/g, " ").trim()
+        if (line.length > 0) return line
+      }
+      return ""
+    }
+
+    const hasIndependentAssistantContent = (node, blocks) => {
+      if (node.data.status === "interrupted") return true
+      return blocks.some((block) => {
+        if (!isRecord(block)) return false
+        if (block.kind === "text") return typeof block.text === "string" && block.text.trim().length > 0
+        if (block.kind === "tool-call" || block.kind === "reasoning") return false
+        return true
+      })
+    }
+
+    const hasRenderableAssistantContent = (blocks) => blocks.some((block) => (
+      isRecord(block) && block.kind !== "tool-call" && block.kind !== "reasoning"
+    ))
+
+    const thinkGroupForTurn = (keys, nodeStore) => {
+      if (!Array.isArray(keys) || !isRecord(nodeStore) && !(nodeStore instanceof Map)) return undefined
+      const getNode = typeof nodeStore.get === "function"
+        ? (key) => nodeStore.get(key)
+        : (key) => nodeStore[key]
+      const members = []
+      let latest
+      for (const key of keys) {
+        const node = getNode(key)
+        if (!isRecord(node) || node.visibility !== "visible") continue
+        const blocks = assistantBlocks(node)
+        if (blocks === undefined) continue
+        const reasoning = blocks.flatMap((block, blockIndex) => (
+          isRecord(block) && block.kind === "reasoning"
+            ? [{ blockIndex, text: typeof block.text === "string" ? block.text : "" }]
+            : []
+        ))
+        if (reasoning.length === 0) continue
+        members.push({ key, node, blocks })
+        for (const candidate of reasoning) {
+          const summary = lastNonEmptyLine(candidate.text)
+          if (summary.length > 0) {
+            latest = {
+              blockIndex: candidate.blockIndex,
+              key,
+              node,
+              summary,
+              text: candidate.text,
+            }
+          }
+        }
+      }
+      if (members.length === 0) return undefined
+      return { latest, members }
     }
 
     const flattenUniqueCalls = (roots) => {
@@ -134,9 +233,9 @@ window.__ModuleLoader__.load({
       }
     }
 
-    const projectedOrder = (snapshot) => {
+    const projectedToolOrder = (snapshot, order, nodes) => {
       if (!isRecord(snapshot) || !isRecord(snapshot.chat)) return undefined
-      const { order, nodes, locations } = snapshot.chat
+      const { locations } = snapshot.chat
       if (!Array.isArray(order) || typeof locations?.getTurn !== "function") return undefined
       const hidden = new Set()
       const visitedTurns = new Set()
@@ -155,13 +254,86 @@ window.__ModuleLoader__.load({
       return order.filter((key) => !hidden.has(key))
     }
 
-    const projectSnapshot = (snapshot) => {
-      const order = projectedOrder(snapshot)
-      if (order === undefined || order === snapshot.chat.order) return snapshot
+    const projectThinkSnapshot = (snapshot) => {
+      if (!isRecord(snapshot) || !isRecord(snapshot.chat)) return snapshot
+      const { order, nodes } = snapshot.chat
+      if (!Array.isArray(order) || !isRecord(nodes) && !(nodes instanceof Map)) return snapshot
+      const getNode = (key) => nodeFromStore(nodes, key)
+      const byTurn = new Map()
+      for (const key of order) {
+        const node = getNode(key)
+        const turn = turnNumber(node)
+        if (turn === undefined) continue
+        let keys = byTurn.get(turn)
+        if (keys === undefined) {
+          keys = []
+          byTurn.set(turn, keys)
+        }
+        keys.push(key)
+      }
+
+      const replacements = new Map()
+      const hidden = new Set()
+      for (const [turn, keys] of byTurn) {
+        const group = thinkGroupForTurn(keys, nodes)
+        if (group === undefined) continue
+        for (const member of group.members) {
+          const blocks = member.blocks.filter((block) => !isRecord(block) || block.kind !== "reasoning")
+          const projection = group.latest?.key === member.key
+            ? {
+                summary: group.latest.summary,
+                text: group.latest.text,
+                turn,
+                splitIndex: member.blocks
+                  .slice(0, group.latest.blockIndex)
+                  .filter((block) => !isRecord(block) || block.kind !== "reasoning")
+                  .length,
+              }
+            : undefined
+          const projectedNode = {
+            ...member.node,
+            data: {
+              ...member.node.data,
+              blocks,
+            },
+            ...(projection === undefined ? {} : { [thinkProjection]: projection }),
+          }
+          replacements.set(member.key, projectedNode)
+          if (
+            projection === undefined
+            && !hasIndependentAssistantContent(member.node, blocks)
+          ) {
+            hidden.add(member.key)
+          }
+        }
+      }
+      if (replacements.size === 0) return snapshot
+
+      const projectedNodes = projectedNodeStore(nodes, replacements)
+      const projectedOrder = hidden.size === 0 ? order : order.filter((key) => !hidden.has(key))
       return {
         ...snapshot,
         chat: {
           ...snapshot.chat,
+          nodes: projectedNodes,
+          order: projectedOrder,
+        },
+      }
+    }
+
+    const projectSnapshot = (snapshot, collapseTools) => {
+      const thinkProjected = projectThinkSnapshot(snapshot)
+      if (!collapseTools || !isRecord(thinkProjected.chat)) return thinkProjected
+      const order = projectedToolOrder(
+        thinkProjected,
+        thinkProjected.chat.order,
+        thinkProjected.chat.nodes,
+      )
+      if (order === undefined || order === thinkProjected.chat.order) return thinkProjected
+      return {
+        ...thinkProjected,
+        chat: {
+          ...thinkProjected.chat,
           order,
         },
       }
@@ -178,6 +350,58 @@ window.__ModuleLoader__.load({
       if (expandedSessions.has(sessionId)) expandedSessions.delete(sessionId)
       else expandedSessions.add(sessionId)
       for (const listener of expansionListeners) listener()
+    }
+
+    const sessionExpansionKey = (sessionId) => String(sessionId)
+
+    const isThinkExpanded = (sessionId, turn) => (
+      expandedThinkTurns.get(sessionExpansionKey(sessionId))?.has(turn) === true
+    )
+
+    const subscribeThinkExpansion = (listener) => {
+      thinkExpansionListeners.add(listener)
+      return () => {
+        thinkExpansionListeners.delete(listener)
+      }
+    }
+
+    const toggleThinkExpansion = (sessionId, turn) => {
+      const sessionIdKey = sessionExpansionKey(sessionId)
+      let turns = expandedThinkTurns.get(sessionIdKey)
+      if (turns === undefined) {
+        turns = new Set()
+        expandedThinkTurns.set(sessionIdKey, turns)
+      }
+      if (turns.has(turn)) turns.delete(turn)
+      else turns.add(turn)
+      if (turns.size === 0) expandedThinkTurns.delete(sessionIdKey)
+      for (const listener of thinkExpansionListeners) listener()
+    }
+
+    const pruneExpansionState = (sessionId, snapshot) => {
+      const sessionIdKey = sessionExpansionKey(sessionId)
+      if (snapshot.removed === true) {
+        expandedSessions.delete(sessionId)
+        expandedSessions.delete(sessionIdKey)
+        expandedThinkTurns.delete(sessionIdKey)
+        return
+      }
+      const turns = expandedThinkTurns.get(sessionIdKey)
+      if (turns === undefined || !isRecord(snapshot.chat) || !Array.isArray(snapshot.chat.order)) return
+      const liveTurns = new Set()
+      for (const key of snapshot.chat.order) {
+        const turn = turnNumber(nodeFromStore(snapshot.chat.nodes, key))
+        if (turn !== undefined) liveTurns.add(turn)
+      }
+      for (const turn of turns) {
+        if (!liveTurns.has(turn)) turns.delete(turn)
+      }
+      if (turns.size === 0) expandedThinkTurns.delete(sessionIdKey)
+    }
+
+    const clearExpansionState = () => {
+      expandedSessions.clear()
+      expandedThinkTurns.clear()
     }
 
     const rawArguments = (block) => {
@@ -378,6 +602,160 @@ window.__ModuleLoader__.load({
         return OperationToolNode
       }
 
+      const thinkIcon = () => jsx("svg", {
+        "aria-hidden": true,
+        fill: "none",
+        height: 14,
+        viewBox: "0 0 14 14",
+        width: 14,
+        children: jsx("path", {
+          d: "M7 1.4c1.55 0 2.8 2.5 2.8 5.6S8.55 12.6 7 12.6 4.2 10.1 4.2 7 5.45 1.4 7 1.4Zm-4.85 2.8C2.93 2.86 5.72 3.03 8.4 4.58s4.24 3.87 3.46 5.22c-.78 1.34-3.57 1.17-6.25-.38S1.37 5.55 2.15 4.2Zm9.7 0c.78 1.35-.78 3.68-3.46 5.22s-5.47 1.72-6.25.38C1.37 8.45 2.93 6.13 5.6 4.58s5.47-1.72 6.25-.38Z",
+          stroke: "currentColor",
+          strokeWidth: 1.1,
+        }),
+      })
+
+      const operationAssistantNode = (source, routes) => {
+        const OperationAssistantNode = (props) => {
+          const projection = isRecord(props.node) ? props.node[thinkProjection] : undefined
+          const original = (blocks = props.node.data.blocks, status = props.node.data.status) => (
+            jsx(source.component, delegatedProps({
+              ...props,
+              node: {
+                ...props.node,
+                data: {
+                  ...props.node.data,
+                  blocks,
+                  status,
+                },
+              },
+            }, routes))
+          )
+          const expanded = react.useSyncExternalStore(
+            subscribeThinkExpansion,
+            () => isRecord(projection) && isThinkExpanded(props.sessionId, projection.turn),
+            () => false,
+          )
+          if (!isRecord(projection)) return original()
+
+          const blocks = props.node.data.blocks
+          const splitIndex = Math.max(0, Math.min(projection.splitIndex, blocks.length))
+          const before = blocks.slice(0, splitIndex)
+          const after = blocks.slice(splitIndex)
+          const beforeView = hasRenderableAssistantContent(before)
+            ? original(before, props.node.data.status === "interrupted" ? "settled" : props.node.data.status)
+            : null
+          const afterView = hasRenderableAssistantContent(after)
+            || props.node.data.status === "interrupted"
+            ? original(after)
+            : null
+
+          return jsxs("div", {
+            "data-dsd-pancake-think-group": "",
+            style: {
+              color: "var(--dsw-alias-label-secondary)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "16px",
+              minWidth: 0,
+            },
+            children: [
+              beforeView,
+              jsxs("div", {
+                children: [
+                  jsxs("button", {
+                type: "button",
+                "aria-expanded": expanded,
+                "aria-label": expanded
+                  ? `收起最新 Think：${projection.summary}`
+                  : `展开最新 Think：${projection.summary}`,
+                "data-dsd-pancake-think-summary": "",
+                onClick: () => {
+                  toggleThinkExpansion(props.sessionId, projection.turn)
+                },
+                style: {
+                  alignItems: "center",
+                  appearance: "none",
+                  background: "transparent",
+                  border: 0,
+                  color: "inherit",
+                  cursor: "pointer",
+                  display: "flex",
+                  font: "var(--dsw-font-xs-13)",
+                  gap: "8px",
+                  lineHeight: "24px",
+                  margin: 0,
+                  maxWidth: "100%",
+                  minHeight: "24px",
+                  outlineOffset: "2px",
+                  padding: 0,
+                  textAlign: "left",
+                  width: "100%",
+                },
+                children: [
+                  jsx("span", {
+                    style: {
+                      color: "var(--dsw-alias-label-secondary)",
+                      display: "inline-flex",
+                      flex: "0 0 auto",
+                    },
+                    children: thinkIcon(),
+                  }),
+                  jsx("span", {
+                    style: { flex: "0 0 auto" },
+                    children: "Think",
+                  }),
+                  jsx("span", {
+                    "aria-hidden": true,
+                    style: {
+                      color: "var(--dsw-alias-label-caption)",
+                      flex: "0 0 auto",
+                    },
+                    children: "·",
+                  }),
+                  jsx("span", {
+                    style: {
+                      color: "var(--dsw-alias-label-tertiary)",
+                      flex: "1 1 auto",
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    },
+                    children: projection.summary,
+                  }),
+                  jsx("span", {
+                    "aria-hidden": true,
+                    style: {
+                      color: "var(--dsw-alias-label-secondary)",
+                      flex: "0 0 auto",
+                      transform: expanded ? "rotate(180deg)" : undefined,
+                    },
+                    children: "⌄",
+                  }),
+                ],
+                  }),
+                  expanded ? jsx("div", {
+                    "data-dsd-pancake-think-body": "",
+                    style: {
+                      color: "var(--dsw-alias-label-tertiary)",
+                      fontSize: "14px",
+                      lineHeight: "24px",
+                      padding: "4px 0 4px 22px",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    },
+                    children: projection.text,
+                  }) : null,
+                ],
+              }),
+              afterView,
+            ],
+          })
+        }
+        return OperationAssistantNode
+      }
+
       const operationChatView = (source, routes) => {
         const OperationChatView = (props) => {
           const expanded = react.useSyncExternalStore(
@@ -386,13 +764,13 @@ window.__ModuleLoader__.load({
             () => false,
           )
           const useProjectedSession = react.useMemo(() => {
-            if (expanded) return props.useSession
             const cache = new WeakMap()
             return (selector, equality) => props.useSession((snapshot) => {
               if (!isRecord(snapshot)) return selector(snapshot)
+              pruneExpansionState(props.sessionId, snapshot)
               let projected = cache.get(snapshot)
               if (projected === undefined) {
-                projected = projectSnapshot(snapshot)
+                projected = projectSnapshot(snapshot, !expanded)
                 cache.set(snapshot, projected)
               }
               return selector(projected)
@@ -572,6 +950,8 @@ window.__ModuleLoader__.load({
                   else if (rootKind === "header") component = operationHeader(source, routes)
                   else if (sourceSlot === officialChatNodeSlot && source.options.key === "tool-call") {
                     component = operationToolNode(source, routes)
+                  } else if (sourceSlot === officialChatNodeSlot && source.options.key === "assistant-step") {
+                    component = operationAssistantNode(source, routes)
                   } else component = aliasDelegate(source, routes)
                   pluginComponents.add(component)
                   const options = copyEntryOptions(source, targetSlot, children)
@@ -649,6 +1029,7 @@ window.__ModuleLoader__.load({
                 disposeEntryErrors = undefined
                 safelyDispose(stopWatchingErrors)
                 disposeGeneration(false)
+                clearExpansionState()
               }
 
               const shutdown = () => {
@@ -659,6 +1040,7 @@ window.__ModuleLoader__.load({
                 disposeEntryErrors = undefined
                 safelyDispose(stopWatchingErrors)
                 disposeGeneration(false)
+                clearExpansionState()
               }
 
               const reconcileSourceSubscriptions = (sourceSlots, requestRebuild) => {

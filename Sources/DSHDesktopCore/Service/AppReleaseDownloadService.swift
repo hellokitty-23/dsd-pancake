@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// 用户主动下载完成后的最小结果。文件仍在 Downloads（下载）目录；调用方必须在
@@ -110,6 +111,14 @@ public final class AppReleaseDownloadCancellation: @unchecked Sendable {
 /// 只服务于 App 自身固定 GitHub Release 的一次性下载器。它不枚举目录、不覆盖既有
 /// 文件、不挂载 DMG，也不安装或替换正在运行的 App。
 public struct AppReleaseDownloadService: Sendable {
+    private struct FileIdentity: Equatable, Sendable {
+        let device: UInt64
+        let inode: UInt64
+        let size: Int64
+        let modificationSeconds: Int64
+        let modificationNanoseconds: Int64
+    }
+
     private static let checksumBodyLimit = 16 * 1_024
     private static let requestTimeout: TimeInterval = 30
     private static let resourceTimeout: TimeInterval = 15 * 60
@@ -121,6 +130,63 @@ public struct AppReleaseDownloadService: Sendable {
                 requestTimeout: requestTimeout,
                 resourceTimeout: resourceTimeout
             )
+        }
+    }
+
+    /// “下载完成”只是一段内存状态，用户仍可能在 Finder 中移动或删除文件。
+    /// 每次展示完成态以及执行 Finder／打开操作前，都重新确认路径仍指向普通文件；
+    /// 符号链接、目录和已经消失的路径都不能继续沿用已下载状态。
+    public func downloadedFileIsAvailable(_ result: AppReleaseDownloadResult) -> Bool {
+        var isDirectory = ObjCBool(false)
+        guard result.fileURL.isFileURL,
+              FileManager.default.fileExists(
+                  atPath: result.fileURL.path,
+                  isDirectory: &isDirectory
+              ),
+              !isDirectory.boolValue,
+              let values = try? result.fileURL.resourceValues(
+                  forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+              ) else {
+            return false
+        }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
+    /// Finder（访达）或 `open` 接手文件前，再从磁盘读取一次完整内容并核对下载时记录的
+    /// SHA-256。仅检查路径存在不足以证明它仍是已验证文件：用户或其他程序可能在同一路径
+    /// 替换内容。哈希计算放到 utility task，避免大 DMG 阻塞主线程；调用方可通过 Task 或
+    /// 显式 cancellation 中止读取。
+    public func downloadedFileMatchesChecksum(
+        _ result: AppReleaseDownloadResult,
+        cancellation: AppReleaseDownloadCancellation? = nil
+    ) async -> Bool {
+        guard downloadedFileIsAvailable(result) else { return false }
+
+        let operationCancellation = cancellation ?? AppReleaseDownloadCancellation()
+        guard !Task.isCancelled, !operationCancellation.isCancelled else { return false }
+
+        return await withTaskCancellationHandler {
+            let validatedFile: (checksum: String, identity: FileIdentity)
+            do {
+                validatedFile = try await Task.detached(priority: .utility) {
+                    try Self.sha256WithIdentity(
+                        of: result.fileURL,
+                        cancellation: operationCancellation
+                    )
+                }.value
+            } catch {
+                return false
+            }
+
+            guard !Task.isCancelled,
+                  !operationCancellation.isCancelled,
+                  downloadedFileIsAvailable(result),
+                  Self.fileIdentity(at: result.fileURL) == validatedFile.identity else {
+                return false
+            }
+            return validatedFile.checksum.caseInsensitiveCompare(result.sha256) == .orderedSame
+        } onCancel: {
+            operationCancellation.cancel()
         }
     }
 
@@ -209,6 +275,10 @@ public struct AppReleaseDownloadService: Sendable {
             } catch {
                 throw AppReleaseDownloadError.fileOperationFailed(error.localizedDescription)
             }
+            if cancellation?.isCancelled == true {
+                try? fileManager.removeItem(at: finalURL)
+                throw CancellationError()
+            }
             return AppReleaseDownloadResult(fileURL: finalURL, sha256: actualChecksum)
         } catch {
             if fileManager.fileExists(atPath: partURL.path) {
@@ -218,7 +288,7 @@ public struct AppReleaseDownloadService: Sendable {
         }
     }
 
-    /// 只读取并严格验证同一固定 Release 的 sidecar，不下载 DMG。Popover 在用户主动
+    /// 只读取并严格验证同一固定 Release 的 sidecar，不下载 DMG。更新浮层在用户主动
     /// 打开更新详情后调用它，以便旧 Release 缺少 checksum 时只显示发布页而不提供
     /// 未经校验的内置下载入口。
     public func verifyChecksum(
@@ -354,10 +424,20 @@ public struct AppReleaseDownloadService: Sendable {
         of fileURL: URL,
         cancellation: AppReleaseDownloadCancellation? = nil
     ) throws -> String {
+        try sha256WithIdentity(of: fileURL, cancellation: cancellation).checksum
+    }
+
+    private static func sha256WithIdentity(
+        of fileURL: URL,
+        cancellation: AppReleaseDownloadCancellation? = nil
+    ) throws -> (checksum: String, identity: FileIdentity) {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
             throw AppReleaseDownloadError.fileOperationFailed("无法读取 \(fileURL.lastPathComponent)。")
         }
         defer { try? handle.close() }
+        guard let initialIdentity = fileIdentity(for: handle) else {
+            throw AppReleaseDownloadError.fileOperationFailed("下载结果不是可读取的普通文件。")
+        }
 
         var hasher = SHA256()
         while true {
@@ -373,7 +453,42 @@ public struct AppReleaseDownloadService: Sendable {
             if data.isEmpty { break }
             hasher.update(data: data)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard fileIdentity(for: handle) == initialIdentity else {
+            throw AppReleaseDownloadError.fileOperationFailed("校验期间下载文件发生变化。")
+        }
+        return (
+            hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+            initialIdentity
+        )
+    }
+
+    private static func fileIdentity(at fileURL: URL) -> FileIdentity? {
+        var information = stat()
+        guard fileURL.isFileURL,
+              lstat(fileURL.path, &information) == 0,
+              information.st_mode & S_IFMT == S_IFREG else {
+            return nil
+        }
+        return fileIdentity(from: information)
+    }
+
+    private static func fileIdentity(for handle: FileHandle) -> FileIdentity? {
+        var information = stat()
+        guard fstat(handle.fileDescriptor, &information) == 0,
+              information.st_mode & S_IFMT == S_IFREG else {
+            return nil
+        }
+        return fileIdentity(from: information)
+    }
+
+    private static func fileIdentity(from information: stat) -> FileIdentity {
+        FileIdentity(
+            device: UInt64(information.st_dev),
+            inode: UInt64(information.st_ino),
+            size: Int64(information.st_size),
+            modificationSeconds: Int64(information.st_mtimespec.tv_sec),
+            modificationNanoseconds: Int64(information.st_mtimespec.tv_nsec)
+        )
     }
 }
 
