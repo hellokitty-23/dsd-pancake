@@ -8,9 +8,6 @@ final class AppTitlebarControls: NSObject {
     private weak var updateButton: NSButton?
     private weak var terminalButton: NSButton?
     private var availableUpdateCount = 0
-    /// 只记录本次启动期间用户主动完成过一次检查；后台轮询不能凭“已是最新”单独
-    /// 打开标题栏入口，以免把静默检查变成干扰性的状态提示。
-    private var hasManualUpdateCheckResult = false
     private var canToggleTerminal = false
     private var terminalIsVisible = false
     private let onUpdatePressed: (NSView) -> Void
@@ -37,16 +34,9 @@ final class AppTitlebarControls: NSObject {
         renderUpdateControl()
     }
 
-    func recordManualUpdateCheckResult() {
-        hasManualUpdateCheckResult = true
-        renderUpdateControl()
-    }
-
     func presentAvailableUpdatesFromMenu() {
-        guard UpdateIndicatorPresentation.isVisible(
-            forAvailableUpdateCount: availableUpdateCount,
-            hasManualCheckResult: hasManualUpdateCheckResult
-        ), let button = updateButton else {
+        guard UpdateIndicatorPresentation.isVisible(forAvailableUpdateCount: availableUpdateCount),
+              let button = updateButton else {
             return
         }
         onUpdatePressed(button)
@@ -115,17 +105,11 @@ final class AppTitlebarControls: NSObject {
     private func renderUpdateControl() {
         guard let button = updateButton else { return }
         let count = availableUpdateCount
-        let isVisible = UpdateIndicatorPresentation.isVisible(
-            forAvailableUpdateCount: count,
-            hasManualCheckResult: hasManualUpdateCheckResult
-        )
+        let isVisible = UpdateIndicatorPresentation.isVisible(forAvailableUpdateCount: count)
         button.isHidden = !isVisible
         button.isEnabled = isVisible
         button.contentTintColor = count > 0 ? .controlAccentColor : .secondaryLabelColor
-        let label = UpdateIndicatorPresentation.label(
-            forAvailableUpdateCount: count,
-            hasManualCheckResult: hasManualUpdateCheckResult
-        ) ?? "无可用更新"
+        let label = UpdateIndicatorPresentation.label(forAvailableUpdateCount: count) ?? "无可用更新"
         button.toolTip = label
         button.setAccessibilityLabel(label)
         button.setAccessibilityValue(count > 0 ? "可用" : "已检查")
@@ -143,10 +127,7 @@ final class AppTitlebarControls: NSObject {
     }
 
     @objc private func showAvailableUpdates(_ sender: NSButton) {
-        guard UpdateIndicatorPresentation.isVisible(
-            forAvailableUpdateCount: availableUpdateCount,
-            hasManualCheckResult: hasManualUpdateCheckResult
-        ) else {
+        guard UpdateIndicatorPresentation.isVisible(forAvailableUpdateCount: availableUpdateCount) else {
             return
         }
         onUpdatePressed(sender)

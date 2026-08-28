@@ -22,10 +22,8 @@ final class UpdatePopoverController: NSObject, ObservableObject {
 
     @Published private(set) var availability = UpdateAvailability.none
     @Published private(set) var appDownloadState = AppDownloadState.idle
-    @Published private(set) var latestManualCheckReport: UpdateCheckReport?
 
     var onRequestDSHUpdate: ((CachedDSHUpdate) -> Void)?
-    var onRequestManualCheck: (() -> Void)?
 
     private let downloadService = AppReleaseDownloadService()
     private var checksumTask: Task<Void, Never>?
@@ -64,7 +62,6 @@ final class UpdatePopoverController: NSObject, ObservableObject {
             appDownloadState = .idle
         }
         if !availability.hasUpdates,
-           latestManualCheckReport == nil,
            !isDownloading,
            popover.isShown {
             popover.performClose(nil)
@@ -73,19 +70,13 @@ final class UpdatePopoverController: NSObject, ObservableObject {
         }
     }
 
-    /// 手动检查的摘要只留在内存中。它让用户在本次启动中重新打开标题栏入口查看结果，
-    /// 但不会把网络错误、npm 路径或远端响应正文写入偏好。
-    func recordManualCheck(_ report: UpdateCheckReport) {
-        latestManualCheckReport = report
-    }
-
     func toggle(relativeTo button: NSView) {
         if popover.isShown {
             guard !isDownloading else { return }
             popover.performClose(nil)
             return
         }
-        guard availability.hasUpdates || latestManualCheckReport != nil else { return }
+        guard availability.hasUpdates else { return }
         popover.behavior = .transient
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         if let app = availability.app {
@@ -97,12 +88,6 @@ final class UpdatePopoverController: NSObject, ObservableObject {
         guard !isDownloading, downloadTask == nil else { return }
         popover.performClose(nil)
         onRequestDSHUpdate?(cached)
-    }
-
-    func requestManualCheck() {
-        guard !isDownloading else { return }
-        popover.performClose(nil)
-        onRequestManualCheck?()
     }
 
     func downloadAppUpdate(_ check: AppUpdateCheck) {
@@ -236,46 +221,23 @@ private struct UpdatePopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(controller.availability.hasUpdates ? "发现可选更新" : "最近一次检查结果")
+            Text("发现可选更新")
                 .font(.headline)
 
-            if controller.availability.hasUpdates {
-                if let app = controller.availability.app {
-                    appSection(app)
-                }
+            if let app = controller.availability.app {
+                appSection(app)
+            }
 
-                if controller.availability.app != nil, controller.availability.dsh != nil {
-                    Divider()
-                }
+            if controller.availability.app != nil, controller.availability.dsh != nil {
+                Divider()
+            }
 
-                if let dsh = controller.availability.dsh {
-                    dshSection(dsh)
-                }
-            } else {
-                manualCheckResultSection
+            if let dsh = controller.availability.dsh {
+                dshSection(dsh)
             }
         }
         .padding(16)
         .frame(width: 360)
-    }
-
-    private var manualCheckResultSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let report = controller.latestManualCheckReport {
-                Text(report.summary)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("当前没有可选更新。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            Button("再次检查更新…") {
-                controller.requestManualCheck()
-            }
-        }
     }
 
     @ViewBuilder

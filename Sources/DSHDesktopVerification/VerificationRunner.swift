@@ -521,15 +521,9 @@ struct DSHDesktopVerification {
                 && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 2) == "发现 2 项可选更新"
                 && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 1) == "发现 1 项可选更新"
                 && UpdateIndicatorPresentation.label(forAvailableUpdateCount: 0) == nil
-                && UpdateIndicatorPresentation.isVisible(
-                    forAvailableUpdateCount: 0,
-                    hasManualCheckResult: true
-                )
-                && UpdateIndicatorPresentation.label(
-                    forAvailableUpdateCount: 0,
-                    hasManualCheckResult: true
-                ) == "查看最近一次更新检查结果",
-            "标题栏更新图标的可见性或可访问标签不符合独立更新状态"
+                && UpdateIndicatorPresentation.isVisible(forAvailableUpdateCount: 1)
+                && !UpdateIndicatorPresentation.isVisible(forAvailableUpdateCount: 0),
+            "标题栏更新图标没有严格跟随可选更新状态"
         )
 
         let laterCheckAt = manualCheckAt.addingTimeInterval(1)

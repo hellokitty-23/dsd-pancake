@@ -186,23 +186,16 @@ public struct AutomaticUpdateCheckState: Equatable, Sendable {
 
 /// 原生标题栏只需一个稳定、可访问的短标签；网页与私有插件不会参与这个状态。
 public enum UpdateIndicatorPresentation {
-    /// 自动检查只在发现可选更新时显示入口；用户主动检查过后，即使没有更新，也保留
-    /// 一个中性入口以便查看刚才的结果或再次检查。后者仅是本次 App 会话内的 UI 状态，
-    /// 不会写入更新缓存或改变自动检查的时间表。
-    public static func isVisible(
-        forAvailableUpdateCount count: Int,
-        hasManualCheckResult: Bool
-    ) -> Bool {
-        count > 0 || hasManualCheckResult
+    /// 图标是“存在可选更新”的状态提示，而非检查更新的常驻入口。手动检查结果由当次
+    /// 原生确认弹窗呈现；确认没有可选更新后，标题栏必须立刻回到无图标状态。
+    public static func isVisible(forAvailableUpdateCount count: Int) -> Bool {
+        count > 0
     }
 
-    public static func label(
-        forAvailableUpdateCount count: Int,
-        hasManualCheckResult: Bool = false
-    ) -> String? {
+    public static func label(forAvailableUpdateCount count: Int) -> String? {
         if count > 0 {
             return "发现 \(count) 项可选更新"
         }
-        return hasManualCheckResult ? "查看最近一次更新检查结果" : nil
+        return nil
     }
 }

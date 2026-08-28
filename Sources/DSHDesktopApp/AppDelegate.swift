@@ -130,9 +130,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             updatePopover.onRequestDSHUpdate = { [weak self] _ in
                 self?.startDSHUpdateFromPopover()
             }
-            updatePopover.onRequestManualCheck = { [weak self] in
-                self?.startManualUpdateCheck()
-            }
             updateStatus.start()
             coordinator.prepareNotificationAuthorization()
             coordinator.beginStartup()
@@ -232,8 +229,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
 
         guard let report = await updateStatus.checkManually() else { return }
-        coordinator.recordManualUpdateCheckResult()
-        updatePopover.recordManualCheck(report)
         let hasOptionalUpdate = report.hasOptionalUpdate || updateStatus.availability.hasUpdates
         let summaryResponse = await presentUpdateAlert(
             title: "更新检查完成",

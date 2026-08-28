@@ -198,10 +198,6 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         titlebarControls.setUpdateAvailability(availability)
     }
 
-    func recordManualUpdateCheckResult() {
-        titlebarControls.recordManualUpdateCheckResult()
-    }
-
     func presentAvailableUpdatesFromMenu() {
         titlebarControls.presentAvailableUpdatesFromMenu()
     }
