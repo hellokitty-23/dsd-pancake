@@ -1,0 +1,5 @@
+# 此覆盖层仅由 DSD Pancake 启动 DSH 时通过独立的 --patch 提供。
+# 它不是用户 Web profile 的 bundle，不会被普通 `dsh web` 自动加载。
+- insert:
+    - id: dsd-pancake-operation-folding
+      name: '@dsd-pancake/dsh-desktop-operation-folding'

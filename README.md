@@ -1,6 +1,6 @@
 # DSD Pancake
 
-DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载独立的完成提醒和底部终端私有插件；手动运行的普通 DSH 不会加载它们。
+DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 显示在原生 `WKWebView` 中，并在本机服务尚未运行时后台启动它。若服务由 App 自己创建，App 还会按该次启动临时挂载独立的完成提醒、执行操作折叠和底部终端私有插件；手动运行的普通 DSH 不会加载它们。
 
 本项目是独立的本地桌面壳，不打包或分发 DSH，也不是 DSH 的功能分支或官方发布。App 每小时在后台分别只读检查 DSD Pancake 的 GitHub 正式 Release（发行版）和当前 DSH 的 npm `latest`（最新发行标签），并只保存最近检查时间与最小版本缓存；发现更新时仅显示壳层标题栏图标，两个更新都始终由用户独立选择。
 
@@ -8,6 +8,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 
 - 打开固定的本机地址 `http://127.0.0.1:3080/`；
 - 端口空闲时，调用用户当前安装的 DSH；可用时以该次进程专属的 `--patch` 覆盖层加载 App 私有插件；
+- 默认把同一助手轮次中的非交互工具调用收纳为“当前操作 + 操作汇总”，点击汇总行可在当前会话展开／恢复折叠；
 - 对本次 App 创建且已验证归属的 DSH，在 App 原生标题栏右侧提供底部终端按钮和 `⌘J`；终端仅停靠在右侧主内容区域，并将对话与输入框顶到其上方，左侧工程栏保持完整可见、可操作；
 - 发现 App 或 DSH 可选更新时，在 App 原生标题栏左侧显示一个更新图标；点击才打开原生 Popover（浮层），不会向 DSH 网页注入图标、按钮或弹窗；
 - 不打开 Terminal.app，不打开默认浏览器；
@@ -16,9 +17,15 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 - 将同源 DSH 页面留在 App 内，把用户点击的外部链接交给默认浏览器；
 - 提供标准 macOS 编辑快捷键、首次 `⌘Q` 退出确认，以及关闭窗口后继续保留当前网页会话的行为。
 
-首次打开 App 时，macOS 会在需要时询问通知权限。当 App 自己启动的 DSH 中有顶层对话回复，或 goal（目标）进入完成／受阻状态时，私有插件可通过最小原生桥触发 macOS 通知。通知只使用固定文案；不会携带消息正文、任务标题、路径、Cookie 或网页内容。若普通浏览器访问的是 App 已启动的同一个本机服务，DSH 仍会传送该客户端模块，但它因不存在 WebKit 原生桥而完全 no-op（无操作）：不读取会话、不发送通知。
+首次打开 App 时，macOS 会在需要时询问通知权限。当 App 自己启动的 DSH 中有顶层对话回复，或 goal（目标）进入完成／受阻状态时，私有插件可通过最小原生桥触发 macOS 通知。通知只使用固定文案；不会携带消息正文、任务标题、路径、Cookie 或网页内容。若普通浏览器访问的是 App 已启动的同一个本机服务，提醒模块因不存在 WebKit 原生桥而完全 no-op（无操作）：不读取会话、不发送通知；无原生桥依赖的操作折叠仍会作用于这个共享的 patched service（已挂载覆盖层的服务）。手动启动的普通 `dsh web` 不加载任何 App 私有模块。
 
 在 macOS 菜单栏的 `消息 → 完成提醒` 中可选择投递方式；状态会保留到下次启动。`永不` 阻断新的原生通知，`仅在未聚焦时`（默认）只在 App 不在前台、窗口隐藏或最小化时提醒，`一律` 则在所有状态下提醒。切换不重启 DSH，也不改变 macOS 已授予的通知权限。
+
+## 执行操作折叠
+
+操作折叠是 App 私有 DSH 客户端适配器，只使用 DSH 正式 `conversation.view`、`conversation.session.header`、`conversation.chat.node` 和 `tool.call.toolview` slot（插槽），不检查或修改 DOM（文档对象模型）。新会话默认折叠同一助手轮次中的非交互工具卡，只保留实时更新的“当前操作”和按类型、失败数统计的汇总行。汇总行本身就是开关：点击，或聚焦后按 Enter／Space（空格），可展开现有卡片，且当前会话后续操作也保持展开；再次操作则恢复折叠。
+
+状态按 DSH session（会话）隔离，仅保留在本次 App 运行的内存中，重启后恢复默认折叠，不写 DSH 会话数据。用户消息、助手正文、最终回复、系统警告与交互式工具不参与折叠；失败数始终可见。折叠态在原生 Chat view（对话视图）创建消息行前投影其只读顺序，只移除同一轮次中摘要锚点以外的可折叠操作，因此不会留下仍占布局间距的空外壳；展开态通过递归 private alias（私有别名插槽）继续使用上游原生工具卡。Chat view 与标题栏去重作为同一代接管启用；若 DSH slot 规格不兼容，或任一私有别名注册／渲染失败，本次 App 运行会完整撤销折叠接管并保留上游原生界面，不留下空白卡片或重复标签。
 
 ## 底部终端
 
@@ -40,7 +47,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 - 不提供网页可调用的通用终端、任意 bridge 命令执行、远程 DSH 管理或跨工作区共享 shell；唯一的本机终端仅面向当前 owned DSH 的有效 workspace；
 - 不收集遥测数据，也不将网页内容、Cookie 或会话数据写入项目日志。
 
-为让该次 `--patch` 能解析 App 内的私有包，App 只会在 DSH home 的 `profiles/node_modules/@dsd-pancake/` 下维护分别指向提醒和终端 bundle 资源的符号链接；若任一精确路径是用户文件，或符号链接仍指向可访问目录，则仅让对应能力安全降级，绝不覆盖。只有该 App 保留命名空间中的旧链接已失效时，才会把它修复为当前 bundle，以支持移动或替换 `.app`。
+为让该次 `--patch` 能解析 App 内的私有包，App 只会在 DSH home 的 `profiles/node_modules/@dsd-pancake/` 下维护分别指向提醒、操作折叠和终端 bundle 资源的符号链接；若任一精确路径是用户文件，或符号链接仍指向可访问目录，则仅让对应能力安全降级，绝不覆盖。只有该 App 保留命名空间中的旧链接已失效时，才会把它修复为当前 bundle，以支持移动或替换 `.app`。
 
 ## 前置条件
 
@@ -48,7 +55,7 @@ DSD Pancake 是一个 macOS 薄壳：它把用户**已经安装**的 DSH Web UI 
 - 可用的 Swift Command Line Tools；
 - 已独立安装可运行的 `dsh`，以及该 DSH 所需的 Node.js 环境。
 
-当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／终端插件的兼容性是两件事：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
+当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／操作折叠／终端插件的兼容性是两件事：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
 
 App 会依次检查上次手动选择的可执行文件、`/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。找不到时，界面会让用户手动选择现有的 `dsh` 可执行文件。
 
@@ -88,7 +95,7 @@ zsh scripts/local-release/build-release.zsh
 
 `scripts/verify.zsh` 会跳过对当前正在使用的 `127.0.0.1:3080` 的 HTTP 探测；其余检查只使用受控子进程和随机端口测试夹具。
 
-打包完成后会得到类似 `local-release/DSD-Pancake-v0.0.3-arm64.dmg` 及同名 `.sha256` sidecar，同时保留 `.app`、ZIP 和 build plist（构建映射文件）。公开发布时必须把 DMG 与 sidecar 一起上传。用户下载后可让 App 校验，也可使用 `shasum -a 256` 手动核对 sidecar；随后打开 DMG，将 `DSD Pancake.app` 拖到同一窗口中的 `Applications` 快捷入口即可。已有同名 App 时选择“替换”，随后从“应用程序”启动它。
+打包完成后会得到类似 `local-release/DSD-Pancake-v0.0.4-arm64.dmg` 及同名 `.sha256` sidecar，同时保留 `.app`、ZIP 和 build plist（构建映射文件）。公开发布时必须把 DMG 与 sidecar 一起上传。用户下载后可让 App 校验，也可使用 `shasum -a 256` 手动核对 sidecar；随后打开 DMG，将 `DSD Pancake.app` 拖到同一窗口中的 `Applications` 快捷入口即可。已有同名 App 时选择“替换”，随后从“应用程序”启动它。
 
 打包脚本会在组装完成后使用 macOS 自带的 `codesign --sign -` 做本机 ad-hoc（无身份）签名，以便系统可靠识别 App 身份并登记通知权限。这不需要 Xcode、Apple 开发者账号、证书或公证，也不会自动写入 `/Applications` 或安装 DSH。DMG 只改善拖拽安装体验，不会把 App 变成 Developer ID（开发者身份）签名或已公证软件；若要面向陌生用户公开发布，仍应另行建立 Developer ID 签名、hardened runtime（强化运行时）与 Apple notarization（公证）流程。
 
@@ -97,7 +104,7 @@ zsh scripts/local-release/build-release.zsh
 ```text
 Sources/                    macOS 应用层、核心服务层与受控验证器
 Resources/                  Info.plist、通知／Finder 图标与独立 Dock 图标
-Plugins/                    随 App 打包的私有 DSH 完成提醒与底部终端插件
+Plugins/                    随 App 打包的私有 DSH 提醒、操作折叠与底部终端插件
 scripts/                    受控验证、本地 .app 打包与结构校验
 docs/                       公开架构与使用文档
 ```

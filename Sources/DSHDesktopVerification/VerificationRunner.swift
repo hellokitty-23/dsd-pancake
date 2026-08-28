@@ -57,6 +57,10 @@ struct DSHDesktopVerification {
             try verifyTerminalPluginBridgeAndDockLayout()
         } failures: { failures.append($0) }
 
+        await run("App 私有执行操作折叠插件") {
+            try verifyOperationFoldingPlugin()
+        } failures: { failures.append($0) }
+
         await run("真实 PTY 与工作区终端进程组清理") {
             try await verifyPTYProcessGroupCleanup()
         } failures: { failures.append($0) }
@@ -253,23 +257,44 @@ struct DSHDesktopVerification {
             "带提醒覆盖层时没有使用 DSH launcher 的 --profile/--patch 参数"
         )
         let terminalPatchURL = URL(fileURLWithPath: "/tmp/dsd-pancake-terminal.yml")
-        let doublyPatchedSpec = LaunchEnvironment.makeSpec(
+        let operationFoldingPatchURL = URL(fileURLWithPath: "/tmp/dsd-pancake-operation-folding.yml")
+        let privatelyPatchedSpec = LaunchEnvironment.makeSpec(
             executable: executable,
             baseEnvironment: ["PATH": "/usr/bin:/bin", "HOME": "/tmp/dshd-home"],
             homeDirectory: URL(fileURLWithPath: "/tmp/dshd-home", isDirectory: true),
             notificationPatchURL: patchURL,
-            terminalPatchURL: terminalPatchURL
+            terminalPatchURL: terminalPatchURL,
+            operationFoldingPatchURL: operationFoldingPatchURL
         )
         try expect(
-            doublyPatchedSpec.arguments == [
+            privatelyPatchedSpec.arguments == [
                 "--profile", "web",
                 "--patch", patchURL.path,
                 "--patch", terminalPatchURL.path,
+                "--patch", operationFoldingPatchURL.path,
                 "--no-open",
                 "--host", "127.0.0.1",
                 "--port", "3080",
             ],
-            "两个 App 私有插件没有以独立 launcher --patch 顺序启动"
+            "App 私有插件没有以独立 launcher --patch 顺序启动"
+        )
+        try expect(
+            PrivatePluginFallbackPolicy.shouldRetry(
+                overlayPendingForCurrentSpawn: true,
+                quitPending: false
+            ),
+            "复用旧 WebContainer 时，当前带覆盖层 spawn 在就绪前失败没有退回标准启动"
+        )
+        try expect(
+            !PrivatePluginFallbackPolicy.shouldRetry(
+                overlayPendingForCurrentSpawn: false,
+                quitPending: false
+            )
+                && !PrivatePluginFallbackPolicy.shouldRetry(
+                    overlayPendingForCurrentSpawn: true,
+                    quitPending: true
+                ),
+            "已 ready／无覆盖层的后续退出或 App 退出事务仍错误触发私有覆盖层回退"
         )
         try expect(
             DSHLocator().locate(lastChosenPath: echoURL.path)?.url == echoURL,
@@ -1139,6 +1164,37 @@ struct DSHDesktopVerification {
             "现存同名 resolver 符号链接被修改"
         )
 
+        let symlinkScopeHome = root.appendingPathComponent("symlink-scope-home", isDirectory: true)
+        let externalScope = root.appendingPathComponent("external-resolver-scope", isDirectory: true)
+        try fileManager.createDirectory(at: externalScope, withIntermediateDirectories: true)
+        let symlinkScope = symlinkScopeHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake", isDirectory: true)
+        try fileManager.createDirectory(at: symlinkScope.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(atPath: symlinkScope.path, withDestinationPath: externalScope.path)
+        let escapedResolver = externalScope
+            .appendingPathComponent("dsh-desktop-notifications", isDirectory: false)
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: ["DSH_HOME": symlinkScopeHome.path],
+                workingDirectory: workingDirectory,
+                homeDirectory: homeDirectory,
+                fileManager: fileManager
+            )
+            throw VerificationError("符号链接 scope 错误允许写入外部目录")
+        } catch let error as DSHNotificationPluginError {
+            guard case let .resolverPathOccupied(path) = error, path == symlinkScope.path else {
+                throw VerificationError("符号链接 scope 返回了错误类型或路径：\(error)")
+            }
+        }
+        try expect(
+            !fileManager.fileExists(atPath: escapedResolver.path),
+            "符号链接 scope 在外部目录创建了 resolver"
+        )
+        try expect(
+            try fileManager.destinationOfSymbolicLink(atPath: symlinkScope.path) == externalScope.path,
+            "符号链接 scope 被修改"
+        )
+
         let staleHome = root.appendingPathComponent("stale-link-home", isDirectory: true)
         let staleLink = staleHome
             .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-notifications")
@@ -1438,6 +1494,46 @@ struct DSHDesktopVerification {
             "终端插件 resolver 链接未指向 App 私有插件"
         )
         try expect(plugin.patchURL.lastPathComponent == "cordis.patch.yml", "终端覆盖层路径不正确")
+    }
+
+    private static func verifyOperationFoldingPlugin() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("dsd-pancake-operation-folding-plugin-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let pluginDirectory = root.appendingPathComponent("plugin", isDirectory: true)
+        try fileManager.createDirectory(
+            at: pluginDirectory.appendingPathComponent("lib", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data("{\"name\":\"@dsd-pancake/dsh-desktop-operation-folding\"}".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("package.json"))
+        try Data("[]\n".utf8).write(to: pluginDirectory.appendingPathComponent("cordis.patch.yml"))
+        try Data("export function apply() {}\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/index.js"))
+        try Data("window.__ModuleLoader__.load({})\n".utf8)
+            .write(to: pluginDirectory.appendingPathComponent("lib/client.js"))
+
+        guard let plugin = DSHOperationFoldingPlugin(directory: pluginDirectory, fileManager: fileManager) else {
+            throw VerificationError("完整的 App 私有执行操作折叠插件未被识别")
+        }
+        let configuredHome = root.appendingPathComponent("dsh-home", isDirectory: true)
+        try plugin.prepareResolver(
+            baseEnvironment: ["DSH_HOME": configuredHome.path],
+            workingDirectory: root,
+            homeDirectory: root.appendingPathComponent("home", isDirectory: true),
+            fileManager: fileManager
+        )
+        let resolverLink = configuredHome
+            .appendingPathComponent("profiles/node_modules/@dsd-pancake/dsh-desktop-operation-folding")
+        try expect(
+            URL(
+                fileURLWithPath: try fileManager.destinationOfSymbolicLink(atPath: resolverLink.path),
+                isDirectory: true
+            ).standardizedFileURL == pluginDirectory.standardizedFileURL,
+            "操作折叠插件 resolver 链接未指向 App 私有插件"
+        )
+        try expect(plugin.patchURL.lastPathComponent == "cordis.patch.yml", "操作折叠覆盖层路径不正确")
     }
 
     private static func verifyPTYProcessGroupCleanup() async throws {

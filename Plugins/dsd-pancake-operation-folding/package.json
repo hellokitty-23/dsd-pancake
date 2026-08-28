@@ -1,0 +1,21 @@
+{
+  "name": "@dsd-pancake/dsh-desktop-operation-folding",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    }
+  },
+  "license": "MIT"
+}

@@ -7,6 +7,7 @@ project_root=${script_dir:h:h}
 resources_dir="$project_root/Resources"
 notification_plugin_dir="$project_root/Plugins/dsd-pancake-notifications"
 terminal_plugin_dir="$project_root/Plugins/dsd-pancake-terminal"
+operation_folding_plugin_dir="$project_root/Plugins/dsd-pancake-operation-folding"
 output_dir="${DSHD_OUTPUT_DIR:-$project_root/local-release}"
 app_path="$output_dir/DSD Pancake.app"
 archive_path="$output_dir/DSD Pancake.app.zip"
@@ -18,7 +19,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -e "$app_path" || -e "$archive_path" || -e "$metadata_path" ]]; then
+if [[ -e "$app_path" || -L "$app_path" \
+      || -e "$archive_path" || -L "$archive_path" \
+      || -e "$metadata_path" || -L "$metadata_path" ]]; then
     print -u2 "拒绝覆盖既有本地产物：$output_dir"
     print -u2 "请先人工确认并移走旧产物，或设置 DSHD_OUTPUT_DIR 指向空目录。"
     exit 2
@@ -36,6 +39,17 @@ for required_path in \
     "$terminal_plugin_dir/cordis.patch.yml" \
     "$terminal_plugin_dir/lib/index.js" \
     "$terminal_plugin_dir/lib/client.js" \
+    "$operation_folding_plugin_dir/package.json" \
+    "$operation_folding_plugin_dir/cordis.patch.yml" \
+    "$operation_folding_plugin_dir/lib/index.js" \
+    "$operation_folding_plugin_dir/lib/client.js"; do
+    if [[ ! -f "$required_path" || -L "$required_path" ]]; then
+        print -u2 "缺少本机打包所需普通文件，或路径是符号链接：$required_path"
+        exit 1
+    fi
+done
+
+for required_tool in \
     /usr/bin/swift \
     /usr/bin/sips \
     /usr/bin/iconutil \
@@ -43,8 +57,8 @@ for required_path in \
     /usr/bin/codesign \
     /usr/bin/plutil \
     /usr/libexec/PlistBuddy; do
-    if [[ ! -x "$required_path" && ! -f "$required_path" ]]; then
-        print -u2 "缺少本机打包所需文件或工具：$required_path"
+    if [[ ! -f "$required_tool" || ! -x "$required_tool" ]]; then
+        print -u2 "缺少本机打包所需可执行工具：$required_tool"
         exit 1
     fi
 done
@@ -69,6 +83,7 @@ mkdir -p \
     "$app_path/Contents/MacOS" \
     "$app_path/Contents/Resources/DSHNotifications/lib" \
     "$app_path/Contents/Resources/DSHTerminal/lib" \
+    "$app_path/Contents/Resources/DSHOperationFolding/lib" \
     "$app_path/Contents/Resources"
 /usr/bin/ditto "$executable_path" "$app_path/Contents/MacOS/DSHDesktop"
 /usr/bin/ditto "$resources_dir/Info.plist" "$app_path/Contents/Info.plist"
@@ -80,6 +95,10 @@ mkdir -p \
 /usr/bin/ditto "$terminal_plugin_dir/cordis.patch.yml" "$app_path/Contents/Resources/DSHTerminal/cordis.patch.yml"
 /usr/bin/ditto "$terminal_plugin_dir/lib/index.js" "$app_path/Contents/Resources/DSHTerminal/lib/index.js"
 /usr/bin/ditto "$terminal_plugin_dir/lib/client.js" "$app_path/Contents/Resources/DSHTerminal/lib/client.js"
+/usr/bin/ditto "$operation_folding_plugin_dir/package.json" "$app_path/Contents/Resources/DSHOperationFolding/package.json"
+/usr/bin/ditto "$operation_folding_plugin_dir/cordis.patch.yml" "$app_path/Contents/Resources/DSHOperationFolding/cordis.patch.yml"
+/usr/bin/ditto "$operation_folding_plugin_dir/lib/index.js" "$app_path/Contents/Resources/DSHOperationFolding/lib/index.js"
+/usr/bin/ditto "$operation_folding_plugin_dir/lib/client.js" "$app_path/Contents/Resources/DSHOperationFolding/lib/client.js"
 # SwiftTerm 1.20.0 的 Metal renderer 会从 `Bundle.main.resourceURL` 查找这个 bundle，
 # 因此按 macOS 标准放进 Contents/Resources；不要把资源放在 .app 根目录，否则签名会
 # 变成 unsealed contents（未封装内容）。

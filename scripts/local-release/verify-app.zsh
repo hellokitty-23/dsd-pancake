@@ -23,6 +23,11 @@ terminal_plugin_package="$terminal_plugin_dir/package.json"
 terminal_plugin_patch="$terminal_plugin_dir/cordis.patch.yml"
 terminal_plugin_host="$terminal_plugin_dir/lib/index.js"
 terminal_plugin_client="$terminal_plugin_dir/lib/client.js"
+operation_folding_plugin_dir="$app_path/Contents/Resources/DSHOperationFolding"
+operation_folding_plugin_package="$operation_folding_plugin_dir/package.json"
+operation_folding_plugin_patch="$operation_folding_plugin_dir/cordis.patch.yml"
+operation_folding_plugin_host="$operation_folding_plugin_dir/lib/index.js"
+operation_folding_plugin_client="$operation_folding_plugin_dir/lib/client.js"
 swifterm_bundle_dir="$app_path/Contents/Resources/SwiftTerm_SwiftTerm.bundle"
 swifterm_shader="$swifterm_bundle_dir/Shaders.metal"
 
@@ -40,9 +45,13 @@ for required_path in \
     "$terminal_plugin_patch" \
     "$terminal_plugin_host" \
     "$terminal_plugin_client" \
+    "$operation_folding_plugin_package" \
+    "$operation_folding_plugin_patch" \
+    "$operation_folding_plugin_host" \
+    "$operation_folding_plugin_client" \
     "$swifterm_shader"; do
-    if [[ ! -e "$required_path" ]]; then
-        print -u2 "App 包缺少必需文件：$required_path"
+    if [[ ! -f "$required_path" || -L "$required_path" ]]; then
+        print -u2 "App 包缺少必需普通文件，或必需路径是符号链接：$required_path"
         exit 1
     fi
 done
@@ -82,7 +91,7 @@ if [[ -n "$unexpected_macos_executable" ]]; then
     exit 1
 fi
 
-# Release bundle 只有主可执行文件、Info.plist、两套图标、两个已构建的 App 私有插件，
+# Release bundle 只有主可执行文件、Info.plist、两套图标、三个已构建的 App 私有插件，
 # 以及 SwiftTerm 唯一必要的 Metal shader。严格白名单避免未来意外带入 DSH、Node.js、
 # 第三方插件、网页资源或测试夹具。
 if /usr/bin/find "$notification_plugin_dir" -type f \
@@ -115,6 +124,21 @@ if /usr/bin/find "$terminal_plugin_dir" -type d -name node_modules -print -quit 
     exit 1
 fi
 
+if /usr/bin/find "$operation_folding_plugin_dir" -type f \
+    ! -path "$operation_folding_plugin_package" \
+    ! -path "$operation_folding_plugin_patch" \
+    ! -path "$operation_folding_plugin_host" \
+    ! -path "$operation_folding_plugin_client" \
+    -print -quit | /usr/bin/grep -q .; then
+    print -u2 "操作折叠插件目录中发现不属于发行白名单的文件。"
+    exit 1
+fi
+
+if /usr/bin/find "$operation_folding_plugin_dir" -type d -name node_modules -print -quit | /usr/bin/grep -q .; then
+    print -u2 "操作折叠插件目录中不应包含 node_modules。"
+    exit 1
+fi
+
 if /usr/bin/find "$swifterm_bundle_dir" -type f ! -path "$swifterm_shader" -print -quit | /usr/bin/grep -q .; then
     print -u2 "SwiftTerm 资源目录中发现不属于发行白名单的文件。"
     exit 1
@@ -132,15 +156,34 @@ if [[ -n "$unexpected_swifterm_link" ]]; then
     exit 1
 fi
 
-if ! /usr/bin/grep -Fq '"name": "@dsd-pancake/dsh-desktop-notifications"' "$notification_plugin_package"; then
-    print -u2 "提醒插件 package.json 身份不正确。"
-    exit 1
-fi
+verify_plugin_package_name() {
+    local package_path=$1
+    local expected_name=$2
+    local label=$3
+    local actual_name
 
-if ! /usr/bin/grep -Fq '"name": "@dsd-pancake/dsh-desktop-terminal"' "$terminal_plugin_package"; then
-    print -u2 "终端插件 package.json 身份不正确。"
-    exit 1
-fi
+    if ! actual_name=$(/usr/bin/plutil -extract name raw -expect string -o - "$package_path" 2>/dev/null); then
+        print -u2 "$label package.json 无法解析，或 name 不是字符串。"
+        exit 1
+    fi
+    if [[ "$actual_name" != "$expected_name" ]]; then
+        print -u2 "$label package.json 身份不正确：$actual_name"
+        exit 1
+    fi
+}
+
+verify_plugin_package_name \
+    "$notification_plugin_package" \
+    "@dsd-pancake/dsh-desktop-notifications" \
+    "提醒插件"
+verify_plugin_package_name \
+    "$terminal_plugin_package" \
+    "@dsd-pancake/dsh-desktop-terminal" \
+    "终端插件"
+verify_plugin_package_name \
+    "$operation_folding_plugin_package" \
+    "@dsd-pancake/dsh-desktop-operation-folding" \
+    "操作折叠插件"
 
 unexpected_bundle_file=$(/usr/bin/find "$app_path/Contents" -type f \
     ! -path "$plist_path" \
@@ -156,6 +199,10 @@ unexpected_bundle_file=$(/usr/bin/find "$app_path/Contents" -type f \
     ! -path "$terminal_plugin_patch" \
     ! -path "$terminal_plugin_host" \
     ! -path "$terminal_plugin_client" \
+    ! -path "$operation_folding_plugin_package" \
+    ! -path "$operation_folding_plugin_patch" \
+    ! -path "$operation_folding_plugin_host" \
+    ! -path "$operation_folding_plugin_client" \
     ! -path "$swifterm_shader" \
     -print -quit)
 if [[ -n "$unexpected_bundle_file" ]]; then
@@ -169,7 +216,31 @@ if [[ -n "$unexpected_bundle_link" ]]; then
     exit 1
 fi
 
+unexpected_bundle_node=$(/usr/bin/find "$app_path/Contents" ! -type f ! -type d ! -type l -print -quit)
+if [[ -n "$unexpected_bundle_node" ]]; then
+    print -u2 "App 包中发现不属于薄壳白名单的特殊节点：$unexpected_bundle_node"
+    exit 1
+fi
+
+unexpected_bundle_directory=$(/usr/bin/find "$app_path/Contents" -type d \
+    ! -path "$app_path/Contents" \
+    ! -path "$app_path/Contents/MacOS" \
+    ! -path "$app_path/Contents/Resources" \
+    ! -path "$app_path/Contents/Resources/DSHNotifications" \
+    ! -path "$app_path/Contents/Resources/DSHNotifications/lib" \
+    ! -path "$app_path/Contents/Resources/DSHTerminal" \
+    ! -path "$app_path/Contents/Resources/DSHTerminal/lib" \
+    ! -path "$app_path/Contents/Resources/DSHOperationFolding" \
+    ! -path "$app_path/Contents/Resources/DSHOperationFolding/lib" \
+    ! -path "$app_path/Contents/Resources/SwiftTerm_SwiftTerm.bundle" \
+    ! -path "$app_path/Contents/_CodeSignature" \
+    -print -quit)
+if [[ -n "$unexpected_bundle_directory" ]]; then
+    print -u2 "App 包中发现不属于薄壳白名单的目录：$unexpected_bundle_directory"
+    exit 1
+fi
+
 print "PASS: bundle ID = $bundle_identifier"
 print "PASS: version/build = $version/$build_number"
 print "PASS: architecture = $(/usr/bin/lipo -archs "$executable_path")"
-print "PASS: bundle 已通过本机 ad-hoc 签名校验，且仅含 DSD Pancake 主可执行文件、Info.plist、图标、两个 App 私有插件与 SwiftTerm Metal 资源；未捆绑 DSH、Node.js、第三方插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"
+print "PASS: bundle 已通过本机 ad-hoc 签名校验，且仅含 DSD Pancake 主可执行文件、Info.plist、图标、三个 App 私有插件与 SwiftTerm Metal 资源；未捆绑 DSH、Node.js、第三方插件、网页资源或测试夹具，且 automatic/sudden termination 已关闭"

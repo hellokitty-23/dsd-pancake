@@ -125,11 +125,13 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
     /// 启动，并且 listener 归属复核通过后才可能为 true。
     private var terminalBridgeEnabled = false
     /// 记录哪一个直接子进程带着 App 私有覆盖层启动。若它在网页就绪前退出，
-    /// App 只自动重试一次不带插件的标准 DSH，避免提醒功能约束 DSH 升级。
+    /// App 只自动重试一次不带插件的标准 DSH，避免壳层增强约束 DSH 升级。
     private var notificationOverlayHandle: SpawnHandle?
     private var skipNotificationPluginForNextSpawn = false
     private var terminalOverlayHandle: SpawnHandle?
     private var skipTerminalPluginForNextSpawn = false
+    private var operationFoldingOverlayHandle: SpawnHandle?
+    private var skipOperationFoldingPluginForNextSpawn = false
     /// 已处理过失权的 handle 不再重复 probe；停止权一旦撤销，绝不恢复。
     private var ownershipLossReconciledHandle: SpawnHandle?
     /// 只有菜单中的显式更新确认可以进入此状态。它与 AppKit 退出事务互斥，
@@ -208,6 +210,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         setTerminalBridgeEnabled(false)
         notificationOverlayHandle = nil
         terminalOverlayHandle = nil
+        operationFoldingOverlayHandle = nil
         operationGeneration &+= 1
         let generation = operationGeneration
         presentation = .checking
@@ -403,6 +406,8 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         skipNotificationPluginForNextSpawn = false
         terminalOverlayHandle = nil
         skipTerminalPluginForNextSpawn = false
+        operationFoldingOverlayHandle = nil
+        skipOperationFoldingPluginForNextSpawn = false
         reconciledExitedHandle = nil
         reachableServiceAfterExitHandle = nil
         lastObservedExit = nil
@@ -534,12 +539,17 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             baseEnvironment: baseEnvironment,
             homeDirectory: homeDirectory
         )
+        let operationFoldingPatchURL = prepareOperationFoldingPlugin(
+            baseEnvironment: baseEnvironment,
+            homeDirectory: homeDirectory
+        )
         let spec = LaunchEnvironment.makeSpec(
             executable: executable,
             baseEnvironment: baseEnvironment,
             homeDirectory: homeDirectory,
             notificationPatchURL: notificationPatchURL,
-            terminalPatchURL: terminalPatchURL
+            terminalPatchURL: terminalPatchURL,
+            operationFoldingPatchURL: operationFoldingPatchURL
         )
         // 此门控必须早于任何 pipe、attr 或 posix_spawn 资源准备。
         terminationGate = .spawnTransaction
@@ -556,6 +566,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             currentHandle = handle
             notificationOverlayHandle = notificationPatchURL == nil ? nil : handle
             terminalOverlayHandle = terminalPatchURL == nil ? nil : handle
+            operationFoldingOverlayHandle = operationFoldingPatchURL == nil ? nil : handle
             reconciledExitedHandle = nil
             reachableServiceAfterExitHandle = nil
             lastObservedExit = nil
@@ -578,6 +589,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             terminationGate = .clear
             notificationOverlayHandle = nil
             terminalOverlayHandle = nil
+            operationFoldingOverlayHandle = nil
             setNotificationBridgeEnabled(false)
             setTerminalBridgeEnabled(false)
             presentation = .launchFailed(describe(error))
@@ -772,15 +784,21 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
             clearReadinessDeadline(for: handle)
             // `terminalOverlayHandle` 精确绑定到本次直接子进程。只有它仍是当前已验证
             // listener 的 owner，才让 WebKit 页面得到终端 capability。
+            let terminalPatchPrepared = terminalOverlayHandle == handle
             setTerminalBridgeEnabled(
                 DesktopTerminalBridgePolicy.mayEnable(
                     serviceOwnership: .owned,
-                    terminalPatchPrepared: terminalOverlayHandle == handle
+                    terminalPatchPrepared: terminalPatchPrepared
                 )
             )
             switch result {
             case .dshLikely, .reachableUnknown:
                 // 当前会话直接创建且 listener 已证明归属时，manifest 只保留兼容提示作用。
+                // 三个 overlay handle 只表示“本次带覆盖层且尚未 ready”；消费后即使
+                // 持久 WebContainer 仍存在，当前进程后续退出也不会误触发无插件重试。
+                notificationOverlayHandle = nil
+                terminalOverlayHandle = nil
+                operationFoldingOverlayHandle = nil
                 showWebContainer(reloadExisting: true)
             case let .reachableNonHTML(reason):
                 presentation = .launchFailed("本次 dsh 已监听 3080，但根页面不能作为 DSH HTML 加载（\(nonHTMLReasonText(reason))）。可继续检查或查看本次内存日志。")
@@ -895,7 +913,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
                         generation: generation,
                         exitStatus: effectiveExitStatus
                     )
-                } else if !retryWithoutNotificationPluginIfNeeded(handle: handle) {
+                } else if !retryWithoutPrivatePluginsIfNeeded(handle: handle) {
                     presentCompletedExitWithoutReachableServiceIfNeeded(effectiveExitStatus)
                 }
             }
@@ -928,7 +946,7 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         case .unavailable:
             if cleanupComplete {
                 clearReadinessDeadline(for: handle)
-                if !retryWithoutNotificationPluginIfNeeded(handle: handle) {
+                if !retryWithoutPrivatePluginsIfNeeded(handle: handle) {
                     presentCompletedExitWithoutReachableServiceIfNeeded(effectiveExitStatus)
                 }
             } else {
@@ -1064,18 +1082,56 @@ final class AppCoordinator: NSObject, ObservableObject, NSWindowDelegate {
         )
     }
 
+    /// 操作折叠插件只是 DSH 客户端的私有表现层，不需要 native bridge。
+    /// 插件缺失、resolver 被占用或上游不兼容时，核心 Web UI 照常启动。
+    private func prepareOperationFoldingPlugin(
+        baseEnvironment: [String: String],
+        homeDirectory: URL
+    ) -> URL? {
+        if skipOperationFoldingPluginForNextSpawn {
+            skipOperationFoldingPluginForNextSpawn = false
+            return nil
+        }
+        guard let resourceRoot = Bundle.main.resourceURL,
+              let plugin = DSHOperationFoldingPlugin(
+                directory: resourceRoot.appendingPathComponent(
+                    DSHOperationFoldingPlugin.resourcesDirectoryName,
+                    isDirectory: true
+                )
+              ) else {
+            return nil
+        }
+
+        do {
+            try plugin.prepareResolver(
+                baseEnvironment: baseEnvironment,
+                workingDirectory: homeDirectory,
+                homeDirectory: homeDirectory
+            )
+            return plugin.patchURL
+        } catch {
+            return nil
+        }
+    }
+
     /// 覆盖层只要让 DSH 在页面就绪前失败一次，就退回标准启动命令。此路径没有
     /// 轮询或守护进程：它复用原有的退出收敛后启动流程，而且每次失败只尝试一次。
-    private func retryWithoutNotificationPluginIfNeeded(handle: SpawnHandle) -> Bool {
-        guard notificationOverlayHandle == handle || terminalOverlayHandle == handle,
-              webContainer == nil,
-              !quitPending else {
+    private func retryWithoutPrivatePluginsIfNeeded(handle: SpawnHandle) -> Bool {
+        let overlayPrepared = notificationOverlayHandle == handle
+            || terminalOverlayHandle == handle
+            || operationFoldingOverlayHandle == handle
+        guard PrivatePluginFallbackPolicy.shouldRetry(
+            overlayPendingForCurrentSpawn: overlayPrepared,
+            quitPending: quitPending
+        ) else {
             return false
         }
         notificationOverlayHandle = nil
         terminalOverlayHandle = nil
+        operationFoldingOverlayHandle = nil
         skipNotificationPluginForNextSpawn = true
         skipTerminalPluginForNextSpawn = true
+        skipOperationFoldingPluginForNextSpawn = true
         setTerminalBridgeEnabled(false)
         beginStartup()
         return true

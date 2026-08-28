@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// 两个 App 私有 DSH 插件共用的解析器准备逻辑。它只写 App 保留命名空间中的
+/// App 私有 DSH 插件共用的解析器准备逻辑。它只写 App 保留命名空间中的
 /// resolver 符号链接；真正启用仍完全取决于本次 dsh 启动命令里的 `--patch`。
 struct DSHPrivatePlugin: Equatable, Sendable {
     static let requiredRelativeFiles = [
@@ -56,7 +56,7 @@ struct DSHPrivatePlugin: Equatable, Sendable {
         let parent = link.deletingLastPathComponent()
 
         do {
-            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            try Self.ensureResolverScopeDirectory(at: parent, fileManager: fileManager)
             try Self.replaceOwnedResolverLinkIfNeeded(
                 at: link,
                 target: directory,
@@ -102,6 +102,45 @@ struct DSHPrivatePlugin: Equatable, Sendable {
             return false
         }
         return true
+    }
+
+    /// App 保留 scope 必须是这个路径上的真实目录，不能是指向其它位置的链接或特殊节点。
+    /// 创建后再次用 `lstat` 校验，避免检查与创建之间的竞态把 resolver 写到 scope 外部。
+    private static func ensureResolverScopeDirectory(
+        at directory: URL,
+        fileManager: FileManager
+    ) throws {
+        var information = stat()
+        if lstat(directory.path, &information) == 0 {
+            guard (information.st_mode & S_IFMT) == S_IFDIR else {
+                throw DSHPrivatePluginError.resolverPathOccupied(directory.path)
+            }
+            return
+        }
+
+        let inspectionError = errno
+        guard inspectionError == ENOENT else {
+            throw DSHPrivatePluginError.preparationFailed(
+                String(cString: strerror(inspectionError))
+            )
+        }
+
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            throw DSHPrivatePluginError.preparationFailed(error.localizedDescription)
+        }
+
+        information = stat()
+        guard lstat(directory.path, &information) == 0 else {
+            let verificationError = errno
+            throw DSHPrivatePluginError.preparationFailed(
+                String(cString: strerror(verificationError))
+            )
+        }
+        guard (information.st_mode & S_IFMT) == S_IFDIR else {
+            throw DSHPrivatePluginError.resolverPathOccupied(directory.path)
+        }
     }
 
     private static func replaceOwnedResolverLinkIfNeeded(

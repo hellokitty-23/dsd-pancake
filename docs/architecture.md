@@ -10,7 +10,7 @@ Finder
   ▼
 DSD Pancake.app
   ├─ 探测 http://127.0.0.1:3080/
-  ├─ 必要时准备 App 私有提醒／终端插件的解析链接
+  ├─ 必要时准备 App 私有提醒／操作折叠／终端插件的解析链接
   ├─ 必要时以独立的一次性 --patch 启动用户已有的 dsh
   ├─ 管理本次直接创建的子进程
   ├─ 管理每个 workspace 的原生 PTY 与底部 dock
@@ -23,7 +23,7 @@ DSD Pancake.app
           （仅 App 创建的进程加载私有插件）
 ```
 
-App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自动修改它们。DSD Pancake 自身每小时只读检查 GitHub 元数据，发现更新只在原生标题栏显示状态；用户打开原生 Popover 后，App 仅读取并验证固定 Release 的 SHA-256（安全散列算法）sidecar，只有验证成功才显示“下载更新”，并且绝不自动打开、安装、替换或重启 App。唯一的 DSH 写操作是用户看到版本差异、点击“更新 DSH”并在原生弹窗再次确认后，对来源已验证的全局 `@deepseek-ai/dsh` 执行固定 npm 更新；未知安装与 external（外部已有）服务一律不更新。它也不是通用浏览器、网页可调用终端、远程管理器或全局进程清理工具。App bundle 自带的提醒和终端插件都是壳的一部分，不会登记进用户 DSH profile 的 package、bundle 或 patch 配置。
+App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自动修改它们。DSD Pancake 自身每小时只读检查 GitHub 元数据，发现更新只在原生标题栏显示状态；用户打开原生 Popover 后，App 仅读取并验证固定 Release 的 SHA-256（安全散列算法）sidecar，只有验证成功才显示“下载更新”，并且绝不自动打开、安装、替换或重启 App。App 会在 DSH home 的保留命名空间维护三个只指向自身 bundle 的 resolver symlink（解析符号链接），但不改写用户 profile 的 package、bundle 或 patch 配置；唯一会修改 DSH 安装内容的路径，是用户看到版本差异、点击“更新 DSH”并在原生弹窗再次确认后，对来源已验证的全局 `@deepseek-ai/dsh` 执行固定 npm 更新。未知安装与 external（外部已有）服务一律不更新。它也不是通用浏览器、网页可调用终端、远程管理器或全局进程清理工具。App bundle 自带的提醒、操作折叠和终端插件都是壳的一部分。
 
 ## 模块
 
@@ -37,6 +37,7 @@ App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自�
 | 状态层 | 串行状态归约、单实例锁和异步退出事务门控。 |
 | 网页层 | 同源页面与外部链接的导航策略。 |
 | 私有提醒插件 | 只在本 App 创建的 DSH 进程内，观察公开会话摘要并生成最小完成事件。 |
+| 私有操作折叠插件 | 使用 DSH 正式 view／header／keyed slot（视图／标题栏／键控插槽）在消息行创建前按助手轮次收纳非交互工具卡，会话内就地展开／折叠，不写会话数据。 |
 | 原生通知桥 | 仅接受本机同源顶层页面的严格固定协议，负责 macOS 授权、前台抑制、内存去重和通知点击恢复窗口。 |
 | 私有终端插件 | 在 native bridge 已确认可用时订阅正式 `sessions.list` 的 current（当前会话），仅读取其 `cwd` 无界面同步工作区；没有 WebKit bridge 时完全 no-op（无操作）。 |
 | 原生终端层 | AppKit 标题栏按钮、一个持久 `WKWebView` 与一个右侧原生底部 dock；SwiftTerm PTY、工作区隔离、面板状态和 process group（进程组）清理。 |
@@ -57,15 +58,17 @@ App 不打包 DSH、Node.js、用户插件与用户数据，也不会后台自�
      -> DSD Pancake.app/Contents/Resources/DSHNotifications
    $DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-terminal
      -> DSD Pancake.app/Contents/Resources/DSHTerminal
+   $DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-operation-folding
+     -> DSD Pancake.app/Contents/Resources/DSHOperationFolding
    ```
 
    接着用 DSH launcher（启动器）参数数组启动：
 
    ```text
-   dsh --profile web --patch <提醒 patch> --patch <终端 patch> --no-open --host 127.0.0.1 --port 3080
+   dsh --profile web --patch <提醒 patch> --patch <终端 patch> --patch <操作折叠 patch> --no-open --host 127.0.0.1 --port 3080
    ```
 
-   `--patch` 是该进程参数，不会改写默认 profile；因此普通 `dsh web` 和浏览器直接访问的既有 DSH 都不会加载插件。若普通浏览器访问的是 App 已启动的同一服务，DSH 会传送客户端模块，但模块因没有 WebKit 原生桥而不订阅会话、不申请权限、不发送通知或注册终端工作区同步组件。保留命名空间中的失效链接会修复到当前 bundle，任何仍指向可访问目录的链接绝不覆盖。若插件资源、解析链接或带覆盖层的启动在网页就绪前失败，App 仅自动退回一次不带插件的标准 `dsh web` 启动，不循环重试。
+   `--patch` 是该进程参数，不会改写默认 profile；因此普通 `dsh web` 和浏览器直接访问的既有 DSH 都不会加载插件。若普通浏览器访问的是 App 已启动的同一 patched service（已挂载覆盖层的服务），DSH 仍会传送三个客户端模块：提醒和终端因没有 WebKit 原生桥而不订阅会话、不申请权限、不发送通知或同步工作区；操作折叠不依赖原生桥，因此仍会改变该共享服务中的工具卡呈现。保留命名空间中的失效链接会修复到当前 bundle，任何仍指向可访问目录的链接绝不覆盖。若某一插件资源缺失，或对应 resolver（解析路径）被用户文件、符号链接或特殊节点占用，App 只省略这一项 `--patch`，其余准备成功的 patch 仍正常加载；这类准备失败不会触发整套无插件重试。只有已经实际带至少一个 `--patch` 启动的 DSH 进程在网页就绪前退出时，App 才一次性改用不带任何 App 私有 patch 的标准 `dsh web` 重试，且不循环重试。
 
 4. 服务就绪后，只有满足“本 App 直接创建 + 进程身份仍匹配 + 该进程自身监听固定回环端口”的进程才标记为 `owned`（本应用拥有）。原生提醒和终端 bridge 也只在各自 patch 已准备的这个 `owned` 进程有效；已有或后继的 external（外部已有）服务始终没有 bridge 能力。只要 ownership 丢失，终端面板立即收起且所有 App 创建的 PTY 都被清理。
 
@@ -128,6 +131,20 @@ DSH 更新流程与正常启动共享同一条“只停止 owned（本应用拥�
 - 仅做 App 生命周期内有界去重；通知请求使用不透明 event ID（事件标识）作为系统标识，不写入对话或事件日志；
 - 点击通知只恢复 DSD Pancake 主窗口。
 
+## 执行操作折叠
+
+私有操作折叠插件以同一事务覆盖 DSH 正式 `conversation.view` 中 `id: "chat"` 的 list cell（列表单元）与 `conversation.session.header`。Chat view wrapper（对话视图包装组件）仍以 React JSX 委托上游原组件，只把传入的 `useSession` 包装成只读投影：折叠时在上游 `order.map` 创建消息行之前，从 `snapshot.chat.order` 移除每轮摘要 anchor（锚点）以外的可折叠工具 key；`nodes`、`locations`、timeline（时间线）及其他会话字段保持原引用，展开或没有可折叠项时直接返回原始 snapshot（快照）和顺序。这样被收纳的工具不会产生仍占 `gap`（布局间距）的空 `flowItem`（消息流行），用户消息、助手正文、最终回复、系统警告、交互式与未知工具仍由 DSH 原生顺序渲染。
+
+同 `id: "chat"` 的 shadow（影子注册）会同时出现在上游原始 view ledger（视图清单）中，因此标题栏 wrapper 只对注入的 `views.list()` 按 `id` 去重，再委托原生标题栏；其订阅、版本与其他 view 保持不变。Chat view 与标题栏去重必须作为同一代 generation（注册代）一起成功，否则全部回滚，避免出现重复“对话”标签或半接管状态。它不替换 conversation（会话）、session body（会话主体）、turn（轮次）、composer（输入区）或 root（根界面）。
+
+原生 Chat view 的 `conversation.chat.node` 与 `conversation.message.images` child slot（子插槽），以及标题栏的 lineage／actions／utilities（层级／操作／工具区）都映射到唯一 private alias（私有别名插槽）；每一级原生 child slot 的实际获胜项也递归镜像。私有 `tool-call` wrapper 沿用上游注入协议，通过别名树继续委托原生 `tool.call.toolview`，从而保留 `memo`、`forwardRef`、Hooks（钩子）、Cordis 嵌套业务视图及原生 fallback（回退视图），且不会触发 SlotCore 的全局重复声明约束。
+
+插件订阅所有实际经过的上游 source slot（来源插槽）。来源变化时先按逆序释放旧 view／header shadow 与整棵别名树，再同步建立新一代注册，避免同一 cell 出现相同身份与优先级的双注册；任何一步失败都会让上游获胜项立即恢复。注册前还会验证父、子 slot 规格及原始注入协议，并通过 `onEntryError` 监听所有私有注册项的渲染异常：首次异常即在本次 App 运行中熔断、撤销全部接管且不自动重试，避免 dead cell（已让位但仍占位的空白单元）、重复标签或崩溃循环。
+
+每个会话只在模块内存中保存一个展开布尔值；新会话与 App 重启后都默认折叠。渲染时从 `node.location.turn` 和 `snapshot.chat.locations.getTurn` 取得当前助手轮次的有序工具节点，递归收集明确列入白名单的非交互工具，再用稳定 `callId` 去重。该轮第一个可折叠节点作为 anchor（锚点）：折叠时它渲染实时当前操作与统计按钮，其余同类 key 在 Chat view 顺序投影中被省略；展开时返回原始顺序，每个节点复用原生 atomic tool card（原子工具卡）。未知工具、交互工具、缺少 turn 位置或解析失败的节点不隐藏。
+
+汇总按钮是控制器也是状态显示，支持鼠标、Enter 和 Space（空格），并提供 `aria-expanded` 与可读标签。失败数始终展示，大于零时使用克制的错误色；展开后失败详情仍在原生卡中可查。插件不使用 DOM selector（DOM 选择器）、`MutationObserver`、网络、持久化存储或 native bridge。
+
 ## 底部终端
 
 页面端和原生端有刻意窄的分工，避免 DSH 网页获得任意本机命令能力：
@@ -167,7 +184,7 @@ DSH sessions.list current session
 
 ## 本地打包
 
-项目使用 Swift Package Manager，并固定 SwiftTerm `1.20.0`（MIT License；见 `THIRD_PARTY_NOTICES.md`）。`scripts/local-release/build-app.zsh` 将 Release 可执行文件、`Info.plist`、两套图标、两个已构建的 App 私有插件各四个文件，以及 SwiftTerm 唯一必要的 `Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal` 放入 `.app` 后，使用 `codesign --sign -` 完成无身份的本机 ad-hoc 签名。SwiftTerm 当前 Metal renderer 会从标准的 `Bundle.main.resourceURL` 查找这个 bundle；将资源放在 `.app` 根目录会破坏 macOS bundle 的 sealed resources（签名封装资源）规则，因此 `verify-app.zsh` 对标准资源位置使用精确白名单。`PancakeAppIcon` 是由 `Resources/AppIcon.png` 生成的 Finder／原生通知 bundle 身份图标，`DockIcon` 只在运行时显示于 Dock，二者可独立调整留白与构图；白名单拒绝 DSH、Node.js、`node_modules`、第三方插件、网页资源、测试夹具、额外可执行文件和符号链接。`build-dmg.zsh` 只把已通过检查的 App 与指向 `/Applications` 的快捷入口封装为只读压缩 DMG，并强制输出 `DSD-Pancake-v<version>-arm64.dmg` 与精确同名 `.sha256` sidecar；`verify-dmg.zsh` 在挂载前精确比对 sidecar，再真实挂载映像并再次验证其中的 App 与版本化文件名；`build-release.zsh` 是串联整套流程的单一入口。
+项目使用 Swift Package Manager，并固定 SwiftTerm `1.20.0`（MIT License；见 `THIRD_PARTY_NOTICES.md`）。`scripts/local-release/build-app.zsh` 将 Release 可执行文件、`Info.plist`、两套图标、三个已构建的 App 私有插件各四个文件，以及 SwiftTerm 唯一必要的 `Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal` 放入 `.app` 后，使用 `codesign --sign -` 完成无身份的本机 ad-hoc 签名。SwiftTerm 当前 Metal renderer 会从标准的 `Bundle.main.resourceURL` 查找这个 bundle；将资源放在 `.app` 根目录会破坏 macOS bundle 的 sealed resources（签名封装资源）规则，因此 `verify-app.zsh` 对标准资源位置使用精确白名单。`PancakeAppIcon` 是由 `Resources/AppIcon.png` 生成的 Finder／原生通知 bundle 身份图标，`DockIcon` 只在运行时显示于 Dock，二者可独立调整留白与构图；白名单拒绝 DSH、Node.js、`node_modules`、第三方插件、网页资源、测试夹具、额外可执行文件和符号链接。`build-dmg.zsh` 只把已通过检查的 App 与指向 `/Applications` 的快捷入口封装为只读压缩 DMG，并强制输出 `DSD-Pancake-v<version>-arm64.dmg` 与精确同名 `.sha256` sidecar；`verify-dmg.zsh` 在挂载前精确比对 sidecar，再真实挂载映像并再次验证其中的 App 与版本化文件名；`build-release.zsh` 是串联整套流程的单一入口。
 
 这保证“App 是壳”是可检查的包结构，而不只是文档承诺。
 
@@ -177,4 +194,4 @@ DSH sessions.list current session
 zsh scripts/verify.zsh
 ```
 
-验证器覆盖状态机、单实例、日志脱敏、导航、WebKit 持久化配置、私有插件解析链接、提醒与终端 bridge 协议、通知前台策略与去重、终端 workspace 隔离、dock 的 50% 高度上限、右侧内容区域和对话预留高度规则、SemVer（语义版本）、GitHub Release 来源与 npm 路径边界、每小时时间表、缓存失效、标题栏更新标签、固定 Release 资产跳转、严格 SHA-256 sidecar、sidecar 缺失、哈希不匹配、下载中取消、无覆盖目标名和受控 URLProtocol 的实际落盘哈希计算、受控单次命令、受控 HTTP 探测、进程创建／回收／归属和退出门控。客户端插件验证额外证明普通浏览器 no-op、公开 composer footer slot 的不可交互布局预留、无界面工作区同步与最小 bridge 负载。文档中的脚本固定跳过当前 3080，以免读取用户正在使用的服务。
+验证器覆盖状态机、单实例、日志脱敏、导航、WebKit 持久化配置、私有插件解析链接、提醒与终端 bridge 协议、操作折叠的会话状态、`callId` 去重、失败统计与 slot 降级、通知前台策略与去重、终端 workspace 隔离、dock 的 50% 高度上限、右侧内容区域和对话预留高度规则、SemVer（语义版本）、GitHub Release 来源与 npm 路径边界、每小时时间表、缓存失效、标题栏更新标签、固定 Release 资产跳转、严格 SHA-256 sidecar、sidecar 缺失、哈希不匹配、下载中取消、无覆盖目标名和受控 URLProtocol 的实际落盘哈希计算、受控单次命令、受控 HTTP 探测、进程创建／回收／归属和退出门控。客户端插件验证额外证明提醒与终端在普通浏览器中 no-op、正式 tool-call keyed cell 内的默认折叠与就地展开、公开 composer footer slot 的不可交互布局预留、无界面工作区同步与最小 bridge 负载。文档中的脚本固定跳过当前 3080，以免读取用户正在使用的服务。

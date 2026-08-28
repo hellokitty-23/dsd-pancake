@@ -9,7 +9,7 @@
 
 DSD Pancake 不会自动安装或升级这些依赖。它只查找已经存在且可执行的 `dsh`：上次手动选择的路径优先，其次是 `/opt/homebrew/bin/dsh` 和 `/usr/local/bin/dsh`。App 每小时分别静默检查 App 与 DSH 的可选更新，并只保存最近检查时间与最小版本缓存；发现更新时仅在壳的原生标题栏显示图标。App 菜单可立即统一检查两者；DSH 只有用户在原生确认中点击“更新 DSH”，且当前 `dsh` 已验证为 `@deepseek-ai/dsh` 的全局 npm 安装时，才会修改该安装。
 
-当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／终端插件的兼容性需要分别判断：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
+当前开发与受控验证基线为 `@deepseek-ai/dsh 0.1.1-rc.2`。DSH 上游目前仍标注为 Developer preview（开发者预览），后续版本可能包含 breaking changes（破坏性变更）。基础壳与 DSH Web UI（网页界面）的兼容性，和 App 私有提醒／操作折叠／终端插件的兼容性需要分别判断：某项集成不可用时基础 Web UI 仍可能正常工作；只有带 App 私有覆盖层的 DSH 在页面就绪前退出时，App 才会自动重试一次不带插件的启动，不能据此推断未知 DSH 版本中的 client API（客户端接口）仍兼容。
 
 ## 编译与受控验证
 
@@ -33,8 +33,8 @@ zsh scripts/verify.zsh
 local-release/DSD Pancake.app
 local-release/DSD Pancake.app.zip
 local-release/DSD Pancake.build.plist
-local-release/DSD-Pancake-v0.0.3-arm64.dmg
-local-release/DSD-Pancake-v0.0.3-arm64.dmg.sha256
+local-release/DSD-Pancake-v0.0.4-arm64.dmg
+local-release/DSD-Pancake-v0.0.4-arm64.dmg.sha256
 ```
 
 build plist（构建映射文件）的 `AppPath` 与 `ArchivePath` 只记录输出文件名，不记录构建机器的绝对路径；它仍是本地构建映射，不应作为运行时配置。
@@ -51,10 +51,10 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 ./scripts/local-release/build-app.zsh
 ./scripts/local-release/verify-app.zsh "local-release/DSD Pancake.app"
 ./scripts/local-release/build-dmg.zsh "local-release/DSD Pancake.app"
-./scripts/local-release/verify-dmg.zsh "local-release/DSD-Pancake-v0.0.3-arm64.dmg"
+./scripts/local-release/verify-dmg.zsh "local-release/DSD-Pancake-v0.0.4-arm64.dmg"
 ```
 
-打包校验会拒绝包含 DSH、Node.js、`node_modules`（依赖目录）、第三方插件、网页资源、测试夹具或额外可执行文件的 App bundle（应用包）。唯一允许的插件内容是 App 自带提醒和终端包各自的四个已构建文件：`package.json`、`cordis.patch.yml`、`lib/index.js` 和 `lib/client.js`；另外只允许 SwiftTerm `1.20.0` 所需、由 `Bundle.main.resourceURL` 从标准 `Contents/Resources` 读取的 `SwiftTerm_SwiftTerm.bundle/Shaders.metal`。SwiftTerm 为 MIT License，完整声明见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+打包校验会拒绝包含 DSH、Node.js、`node_modules`（依赖目录）、第三方插件、网页资源、测试夹具或额外可执行文件的 App bundle（应用包）。唯一允许的插件内容是 App 自带提醒、操作折叠和终端包各自的四个已构建文件：`package.json`、`cordis.patch.yml`、`lib/index.js` 和 `lib/client.js`；另外只允许 SwiftTerm `1.20.0` 所需、由 `Bundle.main.resourceURL` 从标准 `Contents/Resources` 读取的 `SwiftTerm_SwiftTerm.bundle/Shaders.metal`。SwiftTerm 为 MIT License，完整声明见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 图标也分为两个职责：`Resources/AppIcon.png` 会生成 bundle 的 `PancakeAppIcon` 身份图标，供 Finder 和 macOS 原生通知使用；`Resources/DockIcon.png` 只在运行时显示于 Dock。两者独立生成，调整通知小图标的留白不会再缩小 Dock 图标。
 
@@ -67,7 +67,7 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 3. 将 `DSD Pancake.app` 拖到同一窗口内的 `Applications` 快捷入口；若 Finder（访达）询问，选择“替换”。
 4. 从“应用程序”启动 `DSD Pancake`。
 
-同一 bundle ID（App 身份）下的正常替换会保留壳自身的 WebKit 登录状态和窗口偏好。App 仍要求目标 Mac 已独立安装可运行的 `dsh`；复制这个 `.app` 不会复制、安装或升级 DSH、Node.js 或用户插件。它只携带两个随 App 使用的私有插件：完成提醒与底部终端。菜单中的显式 npm 更新是独立的用户确认操作，不属于 App 安装或替换流程。
+同一 bundle ID（App 身份）下的正常替换会保留壳自身的 WebKit 登录状态和窗口偏好。App 仍要求目标 Mac 已独立安装可运行的 `dsh`；复制这个 `.app` 不会复制、安装或升级 DSH、Node.js 或用户插件。它只携带三个随 App 使用的私有插件：完成提醒、执行操作折叠与底部终端。菜单中的显式 npm 更新是独立的用户确认操作，不属于 App 安装或替换流程。
 
 本地构建会在 App 组装完成后执行 `codesign --sign -`：这是 macOS 自带的 ad-hoc（无身份）签名，用于绑定最终 App 的身份并使通知权限能够可靠登记。它不需要 Xcode、Apple 开发者账号、证书或公证；自己在构建机器上使用不需要额外步骤。DMG 只封装这份 App 并提供拖拽入口，不改变其信任等级。若把 DMG 或 ZIP 发给其他人，macOS 仍可能显示开发者验证提示；正式对外分发仍应另行配置 Developer ID（开发者身份）签名、hardened runtime（强化运行时）与 Apple notarization（公证）。
 
@@ -75,7 +75,7 @@ DSHD_OUTPUT_DIR="$PWD/release/dev" ./scripts/local-release/build-release.zsh
 
 1. App 先检查 `http://127.0.0.1:3080/`。
 2. 若该地址已有服务，App 只在确认后显示或保留它，不会停止、重启或接管它。
-3. 若端口空闲，App 才会启动当前找到的 `dsh`，并仅管理本次直接创建的进程。若 bundle 内私有插件可用，启动命令会是 `dsh --profile web --patch <提醒 patch> --patch <终端 patch> --no-open --host 127.0.0.1 --port 3080`；每个覆盖层都只作用于这一次子进程。
+3. 若端口空闲，App 才会启动当前找到的 `dsh`，并仅管理本次直接创建的进程。若 bundle 内私有插件可用，启动命令会是 `dsh --profile web --patch <提醒 patch> --patch <终端 patch> --patch <操作折叠 patch> --no-open --host 127.0.0.1 --port 3080`；每个覆盖层都只作用于这一次子进程。
 4. 关闭窗口只隐藏窗口；第一次 `⌘Q` 总会显示安全退出确认层。只有可验证为本次 App 创建的 DSH 才可能收到一次 `SIGTERM`。
 
 确认层会说明本次退出的范围：四秒内再次按 `⌘Q` 时，若 DSH 是本次 App 创建且归属仍有效，会先请求停止它再退出；若服务是 App 打开前已存在的 external（外部已有）服务，或当前没有 DSH，则只退出 App，不会停止服务。`Esc`、取消、背景点击或超时都会取消退出，不发送信号。
@@ -115,6 +115,12 @@ App 启动时及之后每隔约一小时会分别发起两个彼此独立的只�
 
 若私有插件文件缺失、链接路径被用户文件或仍指向可访问目录的链接占用，或带覆盖层的 DSH 在网页就绪前退出，App 仍会安全启动核心壳：前两种情况直接没有提醒，最后一种只自动退回一次不带插件的标准 `dsh web` 启动。保留命名空间内的失效旧链接会修复到当前 bundle，以支持移动／替换 App。不会安装插件、改写用户文件、反复重试或触碰已有服务。
 
+## 执行操作折叠
+
+只有 App 本次创建并加载操作折叠 patch 的 DSH 才会改变工具卡的默认呈现。新会话默认显示“当前操作”和“已折叠 N 项操作”汇总行；点击整行，或聚焦后按 Enter／Space（空格），可展开原生工具卡。展开后当前会话后续操作直接展开；再次操作恢复折叠。会话之间互不影响，状态只在本次 App 运行期内保留。
+
+折叠只影响明确列入白名单的非交互工具；用户消息、助手正文、系统警告、交互式问题和未知工具不隐藏。失败数始终显示，展开后可在原生卡中查看详情。插件只用 DSH 正式 slot（插槽）：在 Chat view 创建外层消息行前投影只读顺序，并以唯一 private alias（私有别名插槽）递归委托原生嵌套工具视图，因此折叠项不会留下空行或累计布局间距。它不扫描 DOM，不读写网络、持久化存储或 DSH 会话数据。Chat view 接管与标题栏 view 去重作为同一事务启用；slot 规格不兼容、私有别名注册失败或私有 entry（注册项）渲染异常时，本次 App 运行会撤销整个折叠接管并保留 DSH 原生界面。
+
 ## 底部终端
 
 只有 App 本次创建、仍验证为 owned（本应用拥有）且终端 patch 已准备的 DSH 才会启用 App 原生标题栏右侧的底部终端按钮。普通浏览器、external（外部已有）服务和没有有效 workspace 的会话都不能开启该能力。
@@ -126,6 +132,6 @@ App 启动时及之后每隔约一小时会分别发起两个彼此独立的只�
 
 ## 本地数据与卸载
 
-WebKit 的登录状态、Cookie 和缓存由 macOS 按 App bundle ID 存储。删除 `.app` 不会删除 DSH、Node.js、用户 DSH 插件或 DSH 数据；如需清除壳自身的网页数据，应先完全退出 App，再仅删除与该 bundle ID 对应的 WebKit／Application Support／Preferences 目录。App 为私有提醒和终端插件创建的命名空间符号链接不会加载到普通 DSH；如需手工移除，先退出 App 后删除 `$DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-notifications` 和 `$DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-terminal` 即可。
+WebKit 的登录状态、Cookie 和缓存由 macOS 按 App bundle ID 存储。删除 `.app` 不会删除 DSH、Node.js、用户 DSH 插件或 DSH 数据；如需清除壳自身的网页数据，应先完全退出 App，再仅删除与该 bundle ID 对应的 WebKit／Application Support／Preferences 目录。App 为三个私有插件创建的命名空间符号链接不会加载到普通 DSH；如需手工移除，先退出 App 后删除 `$DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-notifications`、`$DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-operation-folding` 和 `$DSH_HOME/profiles/node_modules/@dsd-pancake/dsh-desktop-terminal` 即可。
 
 若你 fork（派生）本项目并要与原 App 并存，请在首次运行前改掉 [Resources/Info.plist](../Resources/Info.plist) 中的 `CFBundleIdentifier`。bundle ID 同时也是单实例锁与 WebKit 数据命名空间的一部分。

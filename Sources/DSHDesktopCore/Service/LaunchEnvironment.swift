@@ -31,7 +31,8 @@ public enum LaunchEnvironment {
         baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         notificationPatchURL: URL? = nil,
-        terminalPatchURL: URL? = nil
+        terminalPatchURL: URL? = nil,
+        operationFoldingPatchURL: URL? = nil
     ) -> LaunchSpec {
         var environment = baseEnvironment
         let executableDirectory = executable.url.deletingLastPathComponent().path
@@ -45,7 +46,8 @@ public enum LaunchEnvironment {
             executable: executable.url,
             arguments: launchArguments(
                 notificationPatchURL: notificationPatchURL,
-                terminalPatchURL: terminalPatchURL
+                terminalPatchURL: terminalPatchURL,
+                operationFoldingPatchURL: operationFoldingPatchURL
             ),
             workingDirectory: homeDirectory,
             environment: environment
@@ -56,13 +58,14 @@ public enum LaunchEnvironment {
     /// `--profile web` 形式，才能让覆盖层只附着于本次启动。
     public static func launchArguments(
         notificationPatchURL: URL? = nil,
-        terminalPatchURL: URL? = nil
+        terminalPatchURL: URL? = nil,
+        operationFoldingPatchURL: URL? = nil
     ) -> [String] {
-        let patches = [notificationPatchURL, terminalPatchURL].compactMap { $0 }
+        let patches = [notificationPatchURL, terminalPatchURL, operationFoldingPatchURL].compactMap { $0 }
         guard !patches.isEmpty else { return requiredArguments }
 
         // `--patch` 属于 launcher 级选项，允许为同一次 App 私有启动附加多个独立
-        // 覆盖层；两者都不写入用户的 Web profile。
+        // 覆盖层；它们都不写入用户的 Web profile。
         return ["--profile", "web"]
             + patches.flatMap { ["--patch", $0.path] }
             + [
@@ -78,5 +81,17 @@ public enum LaunchEnvironment {
             guard !entry.isEmpty, seen.insert(entry).inserted else { return nil }
             return entry
         }
+    }
+}
+
+/// App 私有覆盖层只在“当前这一次 spawn 尚未就绪”时允许退回无插件启动。
+/// `WKWebView` 会跨启动事务复用，因此不能以网页容器是否存在来判断当前进程
+/// 是否已经 ready（就绪）。
+public enum PrivatePluginFallbackPolicy {
+    public static func shouldRetry(
+        overlayPendingForCurrentSpawn: Bool,
+        quitPending: Bool
+    ) -> Bool {
+        overlayPendingForCurrentSpawn && !quitPending
     }
 }
